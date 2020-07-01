@@ -28,8 +28,6 @@ step-by-step instructions for creating a new Conda Environment and installing th
 conda create --name annotated-butd python=3.7
 conda activate annotated-butd
 
-# Install any libraries you care about -- e.g. PyTorch, Pytorch-Lightning, IPython & Jupyter
-
 # Mac OS/Linux (if using GPU, make sure CUDA already installed)
 conda install pytorch torchvision -c pytorch
 conda install ipython jupyter 
