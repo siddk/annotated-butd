@@ -1,20 +1,95 @@
 /*--------------------- Layout and Typography ----------------------------*/
+
+/**
+ * Clearfix
+ */
+ .wrapper:after, .pagination:after {
+  content: "";
+  display: table;
+  clear: both; }
+
+/**
+ * Reset some basic elements
+ */
+body, h1, h2, h3, h4, h5, h6,
+p, blockquote, pre, hr,
+dl, dd, ol, ul, figure {
+  margin: 0;
+  padding: 0; }
+
+h1, h2, h3, h4, h5, h6, p, blockquote,
+pre, hr, dl, dd, ol, ul, figure {
+  margin: 0;
+  padding: 0; }
+
 /**
  * Basic styling
  */
-
 body {
-  font: 400 14px/1.5 Bitter, "Apple SD Gothic Neo", "Noto Sans", "Source Han Sans", "Noto Sans CJK JP", "Source Han Sans JP", "Noto Sans CJK KR", "Source Han Sans KR", NanumBarunGothic, AppleGothic, "Malgun Gothic", Dotum, sans-serif;
+  font: 400 16px/1.5 Bitter, "Apple SD Gothic Neo", "Noto Sans", "Source Han Sans", "Noto Sans CJK JP", "Source Han Sans JP", "Noto Sans CJK KR", "Source Han Sans KR", NanumBarunGothic, AppleGothic, "Malgun Gothic", Dotum, sans-serif;
   color: #111;
-  background-color: #fdfdfd;
+  background: #f5f5ff;
   -webkit-text-size-adjust: 100%;
   -webkit-font-feature-settings: "kern" 1;
   -moz-font-feature-settings: "kern" 1;
   -o-font-feature-settings: "kern" 1;
   font-feature-settings: "kern" 1;
   font-kerning: normal;
-  word-wrap: break-word;
-}
+  word-wrap: break-word; }
+
+table {
+  width: 100%;
+  margin: 0 0 20px 0;
+  text-align: left; }
+
+@media screen and (max-width: 600px) {
+  img {
+    width: 70%;
+    display: block;
+    padding-left: 15%;
+    padding-right: 15%; }
+
+  .meta-center {
+    text-align: center; }
+
+  td {
+    display: table-row;
+    padding-bottom: 10px; } }
+
+/**
+ * Set `margin-bottom` to maintain vertical rhythm
+ */
+h1, h2, h3, h4, h5, h6,
+p, blockquote, pre,
+ul, ol, dl, figure,
+.highlight {
+  margin-bottom: 15px; }
+
+/**
+ * Images
+ */
+img {
+  max-width: 100%;
+  vertical-align: middle; }
+
+/**
+ * Figures
+ */
+figure > img {
+  display: block; }
+
+figcaption {
+  font-size: 14px; }
+
+/**
+ * Lists
+ */
+ul, ol {
+  margin-left: 30px; }
+
+li > ul,
+li > ol {
+  margin-bottom: 0; }
 
 /**
  * Headings
@@ -36,6 +111,93 @@ a {
     color: #111;
     text-decoration: underline; }
 
+/**
+ * Blockquotes
+ */
+blockquote {
+  color: #828282;
+  border-left: 4px solid #e8e8e8;
+  padding-left: 15px;
+  font-size: 18px;
+  letter-spacing: -1px;
+  font-style: italic; }
+  blockquote > :last-child {
+    margin-bottom: 0; }
+
+/**
+ * Rules
+ */
+hr {
+  height: 4px;
+  margin: 15px 0;
+  border: 0;
+  background-color: #e8e8e8; }
+
+/**
+ * Wrapper
+ */
+.wrapper {
+  max-width: -webkit-calc(1400px - (30px * 2));
+  max-width: calc(1400px - (30px * 2));
+  margin-right: auto;
+  margin-left: auto;
+  padding-right: 30px;
+  padding-left: 30px; }
+  @media screen and (max-width: 1000px) {
+    .wrapper {
+      max-width: -webkit-calc(1400px - (30px));
+      max-width: calc(1400px - (30px));
+      padding-right: 15px;
+      padding-left: 15px; } }
+
+/**
+ * Site header
+ */
+.site-header {
+  min-height: 56px;
+  position: relative; 
+  background-color: #fdfdfd;
+}
+
+.site-title {
+  font-size: 25px;
+  font-weight: 300;
+  line-height: 56px;
+  letter-spacing: -1px;
+  margin-bottom: 0;
+  float: left; }
+  .site-title, .site-title:visited {
+    color: #424242; }
+
+.site-nav {
+  float: right;
+  line-height: 56px; }
+  .site-nav .page-link {
+    color: #111;
+    line-height: 1.5; }
+    .site-nav .page-link:not(:last-child) {
+      margin-right: 20px; }
+  @media screen and (max-width: 600px) {
+    .site-nav .page-link {
+      padding: 20px 0;
+      margin-left: 20px; }
+      .site-nav .page-link:not(:last-child) {
+        margin-right: 0; } }
+
+/**
+ * Site footer
+ */
+.site-footer {
+  padding: 30px 0;
+  font-size: 15px;
+  color: #828282;
+  text-align: center; 
+  background-color: #fdfdfd;
+}
+
+/**
+ * Pycco
+ */
 p {
   margin: 0 0 15px 0;
 }
