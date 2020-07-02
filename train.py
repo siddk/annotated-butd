@@ -55,8 +55,8 @@ class ArgumentParser(Tap):
     gpus: int = 0                                   # Number of GPUs to run with (default :: 0)
 
     # Mode
-    model: str = 'film'                             # Model Architecture to run with -- < butd | film >
-    dataset: str = 'nlvr2'                          # Dataset to run BUTD Model with -- < vqa2 | gqa | nlvr2 >
+    model: str = 'butd'                             # Model Architecture to run with -- < butd | film >
+    dataset: str = 'gqa'                            # Dataset to run BUTD Model with -- < vqa2 | gqa | nlvr2 >
 
     # Bottom-Up Top-Down (BUTD) Model Parameters
     emb_dim: int = 300                              # Word Embedding Dimension --> Should Match GloVe (300)
