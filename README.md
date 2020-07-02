@@ -31,6 +31,6 @@ conda activate annotated-butd
 # Mac OS/Linux (if using GPU, make sure CUDA already installed)
 conda install pytorch torchvision -c pytorch
 conda install ipython jupyter 
-pip install pytorch-lightning typed-argument-parser h5py opencv-python
+pip install pytorch-lightning typed-argument-parser h5py opencv-python matplotlib
 ``` 
    
