@@ -1,0 +1,2359 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta http-equiv="content-type" content="text/html;charset=utf-8">
+  <title>gqa.py</title>
+  <link rel="stylesheet" href="pycco.css">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css?family=Bitter:400,400i,700" rel="stylesheet">
+</head>
+<body>
+<div id='container'>
+  <div id="background"></div>
+  <div class='section'>
+    <div class='docs'><h1>gqa.py</h1></div>
+  </div>
+  <div class='clearall'>
+  <div class='section' id='section-0'>
+    <div class='docs'>
+      <div class='octowrap'>
+        <a class='octothorpe' href='#section-0'>#</a>
+      </div>
+      <p><strong>GQA.py</strong> is a streamlined port of the <a href="https://github.com/siddk/annotated-butd">Annotated BUTD</a> repository,
+to exist in a single-file (for those that prefer to see the whole story all at once).</p>
+<p>It steps through each of the stages of training a Bottom-Up Top-Down (BUTD) model
+on the GQA Dataset, including:</p>
+<ul>
+<li><strong>Preprocessing</strong></li>
+<li><strong>Architecture Definition</strong></li>
+<li><strong>Training</strong> (facilitated by <a href="https://pytorch-lightning.readthedocs.io/en/latest/">Pytorch-Lightning</a>)</li>
+</ul>
+<p>Note that this file only includes streamlined code for the original Bottom-Up Top-Down Model, with the simple
+product-based fusion operation.</p>
+<p>For the BUTD-FiLM Model, consult the
+<a href="https://github.com/siddk/annotated-butd/blob/modular/src/models/film.py">Modular branch</a> of the
+<a href="https://github.com/siddk/annotated-butd">Annotated BUTD</a> repository &ndash; the code is quite similar.</p>
+<p>To run this executable file, run the following (append <code>--gpus 1</code> if running on GPU):</p>
+<pre><code>python gqa.py --run_name GQA
+</code></pre>
+
+<hr />
+    </div>
+    <div class='code'>
+      <div class="highlight"><pre><span></span><span class="kn">from</span> <span class="nn">argparse</span> <span class="kn">import</span> <span class="n">Namespace</span>
+<span class="kn">from</span> <span class="nn">datetime</span> <span class="kn">import</span> <span class="n">datetime</span>
+<span class="kn">from</span> <span class="nn">pytorch_lightning.callbacks</span> <span class="kn">import</span> <span class="n">ModelCheckpoint</span>
+<span class="kn">from</span> <span class="nn">pytorch_lightning.loggers</span> <span class="kn">import</span> <span class="n">LightningLoggerBase</span>
+<span class="kn">from</span> <span class="nn">pytorch_lightning.utilities</span> <span class="kn">import</span> <span class="n">rank_zero_only</span>
+<span class="kn">from</span> <span class="nn">tap</span> <span class="kn">import</span> <span class="n">Tap</span>
+<span class="kn">from</span> <span class="nn">torch.nn.utils.weight_norm</span> <span class="kn">import</span> <span class="n">weight_norm</span>
+<span class="kn">from</span> <span class="nn">torch.utils.data</span> <span class="kn">import</span> <span class="n">Dataset</span><span class="p">,</span> <span class="n">DataLoader</span>
+
+<span class="kn">import</span> <span class="nn">base64</span>
+<span class="kn">import</span> <span class="nn">csv</span>
+<span class="kn">import</span> <span class="nn">numpy</span> <span class="k">as</span> <span class="nn">np</span>
+<span class="kn">import</span> <span class="nn">h5py</span>
+<span class="kn">import</span> <span class="nn">json</span>
+<span class="kn">import</span> <span class="nn">os</span>
+<span class="kn">import</span> <span class="nn">pickle</span>
+<span class="kn">import</span> <span class="nn">pytorch_lightning</span> <span class="k">as</span> <span class="nn">pl</span>
+<span class="kn">import</span> <span class="nn">random</span>
+<span class="kn">import</span> <span class="nn">sys</span>
+<span class="kn">import</span> <span class="nn">torch</span>
+<span class="kn">import</span> <span class="nn">torch.nn</span> <span class="k">as</span> <span class="nn">nn</span></pre></div>
+    </div>
+  </div>
+  <div class='clearall'></div>
+  <div class='section' id='section-1'>
+    <div class='docs'>
+      <div class='octowrap'>
+        <a class='octothorpe' href='#section-1'>#</a>
+      </div>
+      <h2><span id="argument-parser" href="argument-parser"> Argument Parser </span></h2>
+    </div>
+    <div class='code'>
+      <div class="highlight"><pre></pre></div>
+    </div>
+  </div>
+  <div class='clearall'></div>
+  <div class='section' id='section-2'>
+    <div class='docs'>
+      <div class='octowrap'>
+        <a class='octothorpe' href='#section-2'>#</a>
+      </div>
+      <p>Defines an argument parser with paths to the appropriate arguments &ndash; we use
+<a href="https://github.com/swansonk14/typed-argument-parser">Tap</a> for readability.</p>
+<p>Note the arguments <code>gqa_questions</code> and <code>gqa_features</code>. These are paths to the GQA Questions and extracted 
+Bottom-Up Features, and should be pre-downloaded using 
+<a href="https://github.com/siddk/annotated-butd/blob/modular/scripts/gqa.sh">this script</a>. </p>
+<p>We also define an argument 
+<code>gqa_cache</code> that we use to store serialized/formatted data created during the preprocessing step (e.g. HDF5 files).
+Feel free to change this to a path that is convenient for you (and has enough storage &ndash; this directory can grow 
+large!).</p>
+<p>Similarly note the argument <code>glove</code> which contains a path to pre-trained 
+<a href="https://nlp.stanford.edu/projects/glove/">GloVe Embeddings</a>. These can be downloaded via 
+<a href="https://github.com/siddk/annotated-butd/blob/modular/scripts/glove.sh">this script</a>.</p>
+<p>Other important arguments include <code>gpus</code> (the number of gpus to run with :: default = 0), and the random seed <code>seed</code>.</p>
+<p>The argument <code>checkpoint</code> is a path to a checkpoint directory, to store model metrics and checkpoints 
+(saved based on best validation accuracy). Feel free to change this as you see fit.</p>
+<p>All other arguments contain sane defaults for initializing different parts of the BUTD model &ndash; these are not optimized,
+but seem to work well.</p>
+    </div>
+    <div class='code'>
+      <div class="highlight"><pre><span class="k">class</span> <span class="nc">ArgumentParser</span><span class="p">(</span><span class="n">Tap</span><span class="p">):</span>
+    <span class="n">run_name</span><span class="p">:</span> <span class="nb">str</span>                                   <span class="c1"># Run Name -- for informative logging</span>
+
+    <span class="n">data</span><span class="p">:</span> <span class="nb">str</span> <span class="o">=</span> <span class="s2">&quot;data/&quot;</span>                             <span class="c1"># Where downloaded data is located</span>
+    <span class="n">checkpoint</span><span class="p">:</span> <span class="nb">str</span> <span class="o">=</span> <span class="s2">&quot;checkpoints/&quot;</span>                <span class="c1"># Where to save model checkpoints and serialized statistics</span>
+
+    <span class="n">gqa_questions</span><span class="p">:</span> <span class="nb">str</span> <span class="o">=</span> <span class="s1">&#39;data/GQA-Questions&#39;</span>       <span class="c1"># Path to GQA Balanced Training Set of Questions</span>
+    <span class="n">gqa_features</span><span class="p">:</span> <span class="nb">str</span> <span class="o">=</span> <span class="s1">&#39;data/GQA-Features&#39;</span>         <span class="c1"># Path to GQA Features</span>
+    <span class="n">gqa_cache</span><span class="p">:</span> <span class="nb">str</span> <span class="o">=</span> <span class="s1">&#39;data/GQA-Cache&#39;</span>               <span class="c1"># Path to GQA Cache Directory for storing serialized data</span>
+
+    <span class="n">glove</span><span class="p">:</span> <span class="nb">str</span> <span class="o">=</span> <span class="s1">&#39;data/GloVe/glove.6B.300d.txt&#39;</span>     <span class="c1"># Path to GloVe Embeddings File (300-dim)</span>
+
+    <span class="n">gpus</span><span class="p">:</span> <span class="nb">int</span> <span class="o">=</span> <span class="mi">0</span>                                   <span class="c1"># Number of GPUs to run with (default :: 0)</span>
+
+    <span class="n">model</span><span class="p">:</span> <span class="nb">str</span> <span class="o">=</span> <span class="s1">&#39;butd&#39;</span>                             <span class="c1"># Model Architecture to run with -- &lt; butd | film &gt;</span>
+    <span class="n">dataset</span><span class="p">:</span> <span class="nb">str</span> <span class="o">=</span> <span class="s1">&#39;gqa&#39;</span>                            <span class="c1"># Dataset to run BUTD Model with -- &lt; vqa2 | gqa | nlvr2 &gt;</span>
+
+    <span class="n">emb_dim</span><span class="p">:</span> <span class="nb">int</span> <span class="o">=</span> <span class="mi">300</span>                              <span class="c1"># Word Embedding Dimension --&gt; Should Match GloVe (300)</span>
+    <span class="n">emb_dropout</span><span class="p">:</span> <span class="nb">float</span> <span class="o">=</span> <span class="mf">0.0</span>                        <span class="c1"># Dropout to Apply to Word Embeddings</span>
+
+    <span class="n">rnn</span><span class="p">:</span> <span class="nb">str</span> <span class="o">=</span> <span class="s1">&#39;GRU&#39;</span>                                <span class="c1"># RNN Type for Question Encoder --&gt; one of &lt; &#39;GRU&#39; | &#39;LSTM&#39; &gt;</span>
+    <span class="n">rnn_layers</span><span class="p">:</span> <span class="nb">int</span> <span class="o">=</span> <span class="mi">1</span>                             <span class="c1"># Number of RNN Stacked Layers (for Statement Encoder)</span>
+    <span class="n">bidirectional</span><span class="p">:</span> <span class="nb">bool</span> <span class="o">=</span> <span class="kc">False</span>                     <span class="c1"># Whether or not RNN is Bidirectional</span>
+    <span class="n">q_dropout</span><span class="p">:</span> <span class="nb">float</span> <span class="o">=</span> <span class="mf">0.0</span>                          <span class="c1"># RNN Dropout (for Question Encoder)</span>
+
+    <span class="n">attention_dropout</span><span class="p">:</span> <span class="nb">float</span> <span class="o">=</span> <span class="mf">0.2</span>                  <span class="c1"># Dropout for Attention Operation (fusing Image + Question)</span>
+
+    <span class="n">answer_dropout</span><span class="p">:</span> <span class="nb">float</span> <span class="o">=</span> <span class="mf">0.5</span>                     <span class="c1"># Dropout to Apply to Answer Classifier</span>
+
+    <span class="n">hidden</span><span class="p">:</span> <span class="nb">int</span> <span class="o">=</span> <span class="mi">1024</span>                              <span class="c1"># Dimensionality of Hidden Layer (Question Encoder &amp; Object Encoder)</span>
+
+    <span class="n">weight_norm</span><span class="p">:</span> <span class="nb">bool</span> <span class="o">=</span> <span class="kc">True</span>                        <span class="c1"># Boolean whether or not to use Weight Normalization</span>
+
+    <span class="n">bsz</span><span class="p">:</span> <span class="nb">int</span> <span class="o">=</span> <span class="mi">256</span>                                  <span class="c1"># Batch Size --&gt; the Bigger the Better</span>
+    <span class="n">epochs</span><span class="p">:</span> <span class="nb">int</span> <span class="o">=</span> <span class="mi">15</span>                                <span class="c1"># Number of Training Epochs</span>
+
+    <span class="n">opt</span><span class="p">:</span> <span class="nb">str</span> <span class="o">=</span> <span class="s1">&#39;adamax&#39;</span>                             <span class="c1"># Optimizer for Performing Gradient Updates</span>
+    <span class="n">gradient_clip</span><span class="p">:</span> <span class="nb">float</span> <span class="o">=</span> <span class="mf">0.25</span>                     <span class="c1"># Value for Gradient Clipping</span>
+
+    <span class="n">seed</span><span class="p">:</span> <span class="nb">int</span> <span class="o">=</span> <span class="mi">7</span>                                   <span class="c1"># Random Seed (for Reproducibility)</span></pre></div>
+    </div>
+  </div>
+  <div class='clearall'></div>
+  <div class='section' id='section-3'>
+    <div class='docs'>
+      <div class='octowrap'>
+        <a class='octothorpe' href='#section-3'>#</a>
+      </div>
+      <hr />
+    </div>
+    <div class='code'>
+      <div class="highlight"><pre></pre></div>
+    </div>
+  </div>
+  <div class='clearall'></div>
+  <div class='section' id='section-4'>
+    <div class='docs'>
+      <div class='octowrap'>
+        <a class='octothorpe' href='#section-4'>#</a>
+      </div>
+      <p><strong>Parse arguments</strong> &ndash; Convert to and from Namespace because of weird PyTorch Lightning Bug, and set the name of the Run
+for meaningful logging.</p>
+    </div>
+    <div class='code'>
+      <div class="highlight"><pre><span class="n">args</span> <span class="o">=</span> <span class="n">Namespace</span><span class="p">(</span><span class="o">**</span><span class="n">ArgumentParser</span><span class="p">()</span><span class="o">.</span><span class="n">parse_args</span><span class="p">()</span><span class="o">.</span><span class="n">as_dict</span><span class="p">())</span>
+<span class="n">run_name</span> <span class="o">=</span> <span class="n">args</span><span class="o">.</span><span class="n">run_name</span> <span class="o">+</span> <span class="s1">&#39;-</span><span class="si">%s</span><span class="s1">&#39;</span> <span class="o">%</span> <span class="n">args</span><span class="o">.</span><span class="n">model</span> <span class="o">+</span> <span class="s1">&#39;-x</span><span class="si">%d</span><span class="s1">&#39;</span> <span class="o">%</span> <span class="n">args</span><span class="o">.</span><span class="n">seed</span> <span class="o">+</span> <span class="s1">&#39;+&#39;</span> <span class="o">+</span> <span class="n">datetime</span><span class="o">.</span><span class="n">now</span><span class="p">()</span><span class="o">.</span><span class="n">strftime</span><span class="p">(</span><span class="s1">&#39;%m-</span><span class="si">%d</span><span class="s1">-[%H:%M]&#39;</span><span class="p">)</span>
+<span class="nb">print</span><span class="p">(</span><span class="s1">&#39;[*] Starting Train Job in Mode </span><span class="si">%s</span><span class="s1"> with Run Name: </span><span class="si">%s</span><span class="s1">&#39;</span> <span class="o">%</span> <span class="p">(</span><span class="n">args</span><span class="o">.</span><span class="n">dataset</span><span class="o">.</span><span class="n">upper</span><span class="p">(),</span> <span class="n">run_name</span><span class="p">))</span></pre></div>
+    </div>
+  </div>
+  <div class='clearall'></div>
+  <div class='section' id='section-5'>
+    <div class='docs'>
+      <div class='octowrap'>
+        <a class='octothorpe' href='#section-5'>#</a>
+      </div>
+      <p><strong>Book-Keeping</strong> &ndash; Set the Random Seed for all relevant libraries.</p>
+    </div>
+    <div class='code'>
+      <div class="highlight"><pre><span class="nb">print</span><span class="p">(</span><span class="s1">&#39;[*] Setting Random Seed to </span><span class="si">%d</span><span class="s1">!&#39;</span> <span class="o">%</span> <span class="n">args</span><span class="o">.</span><span class="n">seed</span><span class="p">)</span>
+<span class="n">random</span><span class="o">.</span><span class="n">seed</span><span class="p">(</span><span class="n">args</span><span class="o">.</span><span class="n">seed</span><span class="p">)</span>
+<span class="n">np</span><span class="o">.</span><span class="n">random</span><span class="o">.</span><span class="n">seed</span><span class="p">(</span><span class="n">args</span><span class="o">.</span><span class="n">seed</span><span class="p">)</span>
+<span class="n">torch</span><span class="o">.</span><span class="n">manual_seed</span><span class="p">(</span><span class="n">args</span><span class="o">.</span><span class="n">seed</span><span class="p">)</span></pre></div>
+    </div>
+  </div>
+  <div class='clearall'></div>
+  <div class='section' id='section-6'>
+    <div class='docs'>
+      <div class='octowrap'>
+        <a class='octothorpe' href='#section-6'>#</a>
+      </div>
+      <hr />
+    </div>
+    <div class='code'>
+      <div class="highlight"><pre></pre></div>
+    </div>
+  </div>
+  <div class='clearall'></div>
+  <div class='section' id='section-7'>
+    <div class='docs'>
+      <div class='octowrap'>
+        <a class='octothorpe' href='#section-7'>#</a>
+      </div>
+      <h2><span id="preprocessing" href="preprocessing"> Preprocessing </span></h2>
+    </div>
+    <div class='code'>
+      <div class="highlight"><pre></pre></div>
+    </div>
+  </div>
+  <div class='clearall'></div>
+  <div class='section' id='section-8'>
+    <div class='docs'>
+      <div class='octowrap'>
+        <a class='octothorpe' href='#section-8'>#</a>
+      </div>
+      <p>There are 4 steps to the preprocessing pipeline:</p>
+<ol>
+<li><strong>Preprocessing Question Data</strong>: Involves creating dictionaries of question tokens, for later vectorization.</li>
+<li><strong>Preprocessing Answer Data</strong>: Creating Mappings between string answers and their corresponding indices (for 
+    softmax prediction in model&rsquo;s final layer)</li>
+<li><strong>Preprocessing Image Features</strong>: Creating an HDF5 file for easy/efficient access to Bottom-Up Object Features for
+    each image, to serve as input to model.</li>
+<li><strong>Dataset Assembly</strong>: Create an official <code>torch.Dataset</code> wrapping the VQA Data in an easy-to-batch format.</li>
+</ol>
+<hr />
+    </div>
+    <div class='code'>
+      <div class="highlight"><pre></pre></div>
+    </div>
+  </div>
+  <div class='clearall'></div>
+  <div class='section' id='section-9'>
+    <div class='docs'>
+      <div class='octowrap'>
+        <a class='octothorpe' href='#section-9'>#</a>
+      </div>
+      <h3><span id="1.-preprocessing-question-data" href="1.-preprocessing-question-data"> 1. Preprocessing Question Data </span></h3>
+    </div>
+    <div class='code'>
+      <div class="highlight"><pre></pre></div>
+    </div>
+  </div>
+  <div class='clearall'></div>
+  <div class='section' id='section-10'>
+    <div class='docs'>
+      <div class='octowrap'>
+        <a class='octothorpe' href='#section-10'>#</a>
+      </div>
+      <p><em>Assemble a Dictionary mapping question tokens to integer indices. Additionally, use the created dictionaries to index 
+and load in GloVe vectors.</em></p>
+<hr />
+    </div>
+    <div class='code'>
+      <div class="highlight"><pre></pre></div>
+    </div>
+  </div>
+  <div class='clearall'></div>
+  <div class='section' id='section-11'>
+    <div class='docs'>
+      <div class='octowrap'>
+        <a class='octothorpe' href='#section-11'>#</a>
+      </div>
+      
+    </div>
+    <div class='code'>
+      <div class="highlight"><pre><span class="k">class</span> <span class="nc">Dictionary</span><span class="p">(</span><span class="nb">object</span><span class="p">):</span></pre></div>
+    </div>
+  </div>
+  <div class='clearall'></div>
+  <div class='section' id='section-12'>
+    <div class='docs'>
+      <div class='octowrap'>
+        <a class='octothorpe' href='#section-12'>#</a>
+      </div>
+      
+    </div>
+    <div class='code'>
+      <div class="highlight"><pre>    <span class="k">def</span> <span class="fm">__init__</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">word2idx</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">idx2word</span><span class="o">=</span><span class="kc">None</span><span class="p">):</span>
+        <span class="k">if</span> <span class="n">word2idx</span> <span class="ow">is</span> <span class="kc">None</span><span class="p">:</span>
+            <span class="n">word2idx</span> <span class="o">=</span> <span class="p">{}</span>
+        <span class="k">if</span> <span class="n">idx2word</span> <span class="ow">is</span> <span class="kc">None</span><span class="p">:</span>
+            <span class="n">idx2word</span> <span class="o">=</span> <span class="p">[]</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">word2idx</span><span class="p">,</span> <span class="bp">self</span><span class="o">.</span><span class="n">idx2word</span> <span class="o">=</span> <span class="n">word2idx</span><span class="p">,</span> <span class="n">idx2word</span></pre></div>
+    </div>
+  </div>
+  <div class='clearall'></div>
+  <div class='section' id='section-13'>
+    <div class='docs'>
+      <div class='octowrap'>
+        <a class='octothorpe' href='#section-13'>#</a>
+      </div>
+      
+    </div>
+    <div class='code'>
+      <div class="highlight"><pre>    <span class="nd">@property</span>
+    <span class="k">def</span> <span class="nf">ntoken</span><span class="p">(</span><span class="bp">self</span><span class="p">):</span>
+        <span class="k">return</span> <span class="nb">len</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">word2idx</span><span class="p">)</span>
+
+    <span class="nd">@property</span>
+    <span class="k">def</span> <span class="nf">padding_idx</span><span class="p">(</span><span class="bp">self</span><span class="p">):</span>
+        <span class="k">return</span> <span class="nb">len</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">word2idx</span><span class="p">)</span>
+
+    <span class="k">def</span> <span class="nf">tokenize</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">sentence</span><span class="p">,</span> <span class="n">add_word</span><span class="p">):</span>
+        <span class="n">sentence</span> <span class="o">=</span> <span class="n">sentence</span><span class="o">.</span><span class="n">lower</span><span class="p">()</span><span class="o">.</span><span class="n">replace</span><span class="p">(</span><span class="s1">&#39;,&#39;</span><span class="p">,</span> <span class="s1">&#39;&#39;</span><span class="p">)</span><span class="o">.</span><span class="n">replace</span><span class="p">(</span><span class="s1">&#39;.&#39;</span><span class="p">,</span> <span class="s1">&#39;&#39;</span><span class="p">)</span><span class="o">.</span><span class="n">replace</span><span class="p">(</span><span class="s1">&#39;?&#39;</span><span class="p">,</span> <span class="s1">&#39;&#39;</span><span class="p">)</span><span class="o">.</span><span class="n">replace</span><span class="p">(</span><span class="s1">&#39;</span><span class="se">\&#39;</span><span class="s1">s&#39;</span><span class="p">,</span> <span class="s1">&#39; </span><span class="se">\&#39;</span><span class="s1">s&#39;</span><span class="p">)</span>
+        <span class="n">words</span><span class="p">,</span> <span class="n">tokens</span> <span class="o">=</span> <span class="n">sentence</span><span class="o">.</span><span class="n">split</span><span class="p">(),</span> <span class="p">[]</span>
+
+        <span class="k">if</span> <span class="n">add_word</span><span class="p">:</span>
+            <span class="k">for</span> <span class="n">w</span> <span class="ow">in</span> <span class="n">words</span><span class="p">:</span>
+                <span class="n">tokens</span><span class="o">.</span><span class="n">append</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">add_word</span><span class="p">(</span><span class="n">w</span><span class="p">))</span>
+        <span class="k">else</span><span class="p">:</span>
+            <span class="k">for</span> <span class="n">w</span> <span class="ow">in</span> <span class="n">words</span><span class="p">:</span>
+                <span class="n">tokens</span><span class="o">.</span><span class="n">append</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">word2idx</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="n">w</span><span class="p">,</span> <span class="bp">self</span><span class="o">.</span><span class="n">padding_idx</span><span class="p">))</span>
+
+        <span class="k">return</span> <span class="n">tokens</span>
+
+    <span class="k">def</span> <span class="nf">add_word</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">word</span><span class="p">):</span>
+        <span class="k">if</span> <span class="n">word</span> <span class="ow">not</span> <span class="ow">in</span> <span class="bp">self</span><span class="o">.</span><span class="n">word2idx</span><span class="p">:</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">idx2word</span><span class="o">.</span><span class="n">append</span><span class="p">(</span><span class="n">word</span><span class="p">)</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">word2idx</span><span class="p">[</span><span class="n">word</span><span class="p">]</span> <span class="o">=</span> <span class="nb">len</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">idx2word</span><span class="p">)</span> <span class="o">-</span> <span class="mi">1</span>
+        <span class="k">return</span> <span class="bp">self</span><span class="o">.</span><span class="n">word2idx</span><span class="p">[</span><span class="n">word</span><span class="p">]</span>
+
+    <span class="k">def</span> <span class="fm">__len__</span><span class="p">(</span><span class="bp">self</span><span class="p">):</span>
+        <span class="k">return</span> <span class="nb">len</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">idx2word</span><span class="p">)</span></pre></div>
+    </div>
+  </div>
+  <div class='clearall'></div>
+  <div class='section' id='section-14'>
+    <div class='docs'>
+      <div class='octowrap'>
+        <a class='octothorpe' href='#section-14'>#</a>
+      </div>
+      <p>Create Dictionary from GQA Question Files, and Initialize GloVe Embeddings from File</p>
+    </div>
+    <div class='code'>
+      <div class="highlight"><pre><span class="k">def</span> <span class="nf">gqa_create_dictionary_glove</span><span class="p">(</span><span class="n">gqa_q</span><span class="o">=</span><span class="s1">&#39;data/GQA-Questions&#39;</span><span class="p">,</span> <span class="n">glove</span><span class="o">=</span><span class="s1">&#39;data/GloVe/glove.6B.300d.txt&#39;</span><span class="p">,</span>
+                                <span class="n">cache</span><span class="o">=</span><span class="s1">&#39;data/GQA-Cache&#39;</span><span class="p">):</span></pre></div>
+    </div>
+  </div>
+  <div class='clearall'></div>
+  <div class='section' id='section-15'>
+    <div class='docs'>
+      <div class='octowrap'>
+        <a class='octothorpe' href='#section-15'>#</a>
+      </div>
+      <hr />
+<p><strong>Note:</strong> It&rsquo;s worth talking about a common design pattern that you&rsquo;ll see throughout this codebase, around utilizing
+the <code>gqa_cache</code> directory to its fullest potential.</p>
+<p>As we compute serialized/formatted versions of data (token dictionaries, embedding matrices, HDF5 files), we cache them
+for future runs to speed up the iteration time.</p>
+<p>For a research codebase (where speedy iteration is the name of the game),
+we find this to be a useful practice.</p>
+<hr />
+    </div>
+    <div class='code'>
+      <div class="highlight"><pre>    <span class="n">dfile</span><span class="p">,</span> <span class="n">gfile</span> <span class="o">=</span> <span class="n">os</span><span class="o">.</span><span class="n">path</span><span class="o">.</span><span class="n">join</span><span class="p">(</span><span class="n">cache</span><span class="p">,</span> <span class="s1">&#39;dictionary.pkl&#39;</span><span class="p">),</span> <span class="n">os</span><span class="o">.</span><span class="n">path</span><span class="o">.</span><span class="n">join</span><span class="p">(</span><span class="n">cache</span><span class="p">,</span> <span class="s1">&#39;glove.npy&#39;</span><span class="p">)</span>
+    <span class="k">if</span> <span class="n">os</span><span class="o">.</span><span class="n">path</span><span class="o">.</span><span class="n">exists</span><span class="p">(</span><span class="n">dfile</span><span class="p">)</span> <span class="ow">and</span> <span class="n">os</span><span class="o">.</span><span class="n">path</span><span class="o">.</span><span class="n">exists</span><span class="p">(</span><span class="n">gfile</span><span class="p">):</span>
+        <span class="k">with</span> <span class="nb">open</span><span class="p">(</span><span class="n">dfile</span><span class="p">,</span> <span class="s1">&#39;rb&#39;</span><span class="p">)</span> <span class="k">as</span> <span class="n">f</span><span class="p">:</span>
+            <span class="n">dictionary</span> <span class="o">=</span> <span class="n">pickle</span><span class="o">.</span><span class="n">load</span><span class="p">(</span><span class="n">f</span><span class="p">)</span>
+
+        <span class="n">weights</span> <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">load</span><span class="p">(</span><span class="n">gfile</span><span class="p">)</span>
+        <span class="k">return</span> <span class="n">dictionary</span><span class="p">,</span> <span class="n">weights</span>
+
+    <span class="k">elif</span> <span class="ow">not</span> <span class="n">os</span><span class="o">.</span><span class="n">path</span><span class="o">.</span><span class="n">exists</span><span class="p">(</span><span class="n">cache</span><span class="p">):</span>
+        <span class="n">os</span><span class="o">.</span><span class="n">makedirs</span><span class="p">(</span><span class="n">cache</span><span class="p">)</span>
+
+    <span class="n">dictionary</span> <span class="o">=</span> <span class="n">Dictionary</span><span class="p">()</span>
+    <span class="n">questions</span> <span class="o">=</span> <span class="p">[</span><span class="s1">&#39;train_balanced_questions.json&#39;</span><span class="p">,</span> <span class="s1">&#39;val_balanced_questions.json&#39;</span><span class="p">,</span> <span class="s1">&#39;testdev_balanced_questions.json&#39;</span><span class="p">,</span>
+                 <span class="s1">&#39;test_balanced_questions.json&#39;</span><span class="p">]</span></pre></div>
+    </div>
+  </div>
+  <div class='clearall'></div>
+  <div class='section' id='section-16'>
+    <div class='docs'>
+      <div class='octowrap'>
+        <a class='octothorpe' href='#section-16'>#</a>
+      </div>
+      <p>Iterate through Question in Question Files and update Vocabulary</p>
+    </div>
+    <div class='code'>
+      <div class="highlight"><pre>    <span class="nb">print</span><span class="p">(</span><span class="s1">&#39;</span><span class="se">\t</span><span class="s1">[*] Creating Dictionary from GQA Questions...&#39;</span><span class="p">)</span>
+    <span class="k">for</span> <span class="n">qfile</span> <span class="ow">in</span> <span class="n">questions</span><span class="p">:</span>
+        <span class="n">qpath</span> <span class="o">=</span> <span class="n">os</span><span class="o">.</span><span class="n">path</span><span class="o">.</span><span class="n">join</span><span class="p">(</span><span class="n">gqa_q</span><span class="p">,</span> <span class="n">qfile</span><span class="p">)</span>
+        <span class="k">with</span> <span class="nb">open</span><span class="p">(</span><span class="n">qpath</span><span class="p">,</span> <span class="s1">&#39;r&#39;</span><span class="p">)</span> <span class="k">as</span> <span class="n">f</span><span class="p">:</span>
+            <span class="n">examples</span> <span class="o">=</span> <span class="n">json</span><span class="o">.</span><span class="n">load</span><span class="p">(</span><span class="n">f</span><span class="p">)</span>
+
+        <span class="k">for</span> <span class="n">ex_key</span> <span class="ow">in</span> <span class="n">examples</span><span class="p">:</span>
+            <span class="n">ex</span> <span class="o">=</span> <span class="n">examples</span><span class="p">[</span><span class="n">ex_key</span><span class="p">]</span>
+            <span class="n">dictionary</span><span class="o">.</span><span class="n">tokenize</span><span class="p">(</span><span class="n">ex</span><span class="p">[</span><span class="s1">&#39;question&#39;</span><span class="p">],</span> <span class="n">add_word</span><span class="o">=</span><span class="kc">True</span><span class="p">)</span></pre></div>
+    </div>
+  </div>
+  <div class='clearall'></div>
+  <div class='section' id='section-17'>
+    <div class='docs'>
+      <div class='octowrap'>
+        <a class='octothorpe' href='#section-17'>#</a>
+      </div>
+      <p>Load GloVe Embeddings</p>
+    </div>
+    <div class='code'>
+      <div class="highlight"><pre>    <span class="nb">print</span><span class="p">(</span><span class="s1">&#39;</span><span class="se">\t</span><span class="s1">[*] Loading GloVe Embeddings...&#39;</span><span class="p">)</span>
+    <span class="k">with</span> <span class="nb">open</span><span class="p">(</span><span class="n">glove</span><span class="p">,</span> <span class="s1">&#39;r&#39;</span><span class="p">)</span> <span class="k">as</span> <span class="n">f</span><span class="p">:</span>
+        <span class="n">entries</span> <span class="o">=</span> <span class="n">f</span><span class="o">.</span><span class="n">readlines</span><span class="p">()</span></pre></div>
+    </div>
+  </div>
+  <div class='clearall'></div>
+  <div class='section' id='section-18'>
+    <div class='docs'>
+      <div class='octowrap'>
+        <a class='octothorpe' href='#section-18'>#</a>
+      </div>
+      <p>Assert that we&rsquo;re using the 300-Dimensional GloVe Embeddings</p>
+    </div>
+    <div class='code'>
+      <div class="highlight"><pre>    <span class="k">assert</span> <span class="nb">len</span><span class="p">(</span><span class="n">entries</span><span class="p">[</span><span class="mi">0</span><span class="p">]</span><span class="o">.</span><span class="n">split</span><span class="p">())</span> <span class="o">-</span> <span class="mi">1</span> <span class="o">==</span> <span class="mi">300</span><span class="p">,</span> <span class="s1">&#39;ERROR - Not using 300-dimensional GloVe Embeddings!&#39;</span></pre></div>
+    </div>
+  </div>
+  <div class='clearall'></div>
+  <div class='section' id='section-19'>
+    <div class='docs'>
+      <div class='octowrap'>
+        <a class='octothorpe' href='#section-19'>#</a>
+      </div>
+      <p>Create Embedding Weights</p>
+    </div>
+    <div class='code'>
+      <div class="highlight"><pre>    <span class="n">weights</span> <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">zeros</span><span class="p">((</span><span class="nb">len</span><span class="p">(</span><span class="n">dictionary</span><span class="o">.</span><span class="n">idx2word</span><span class="p">),</span> <span class="mi">300</span><span class="p">),</span> <span class="n">dtype</span><span class="o">=</span><span class="n">np</span><span class="o">.</span><span class="n">float32</span><span class="p">)</span></pre></div>
+    </div>
+  </div>
+  <div class='clearall'></div>
+  <div class='section' id='section-20'>
+    <div class='docs'>
+      <div class='octowrap'>
+        <a class='octothorpe' href='#section-20'>#</a>
+      </div>
+      <p>Populate Embedding Weights</p>
+    </div>
+    <div class='code'>
+      <div class="highlight"><pre>    <span class="k">for</span> <span class="n">entry</span> <span class="ow">in</span> <span class="n">entries</span><span class="p">:</span>
+        <span class="n">word_vec</span> <span class="o">=</span> <span class="n">entry</span><span class="o">.</span><span class="n">split</span><span class="p">()</span>
+        <span class="n">word</span><span class="p">,</span> <span class="n">vec</span> <span class="o">=</span> <span class="n">word_vec</span><span class="p">[</span><span class="mi">0</span><span class="p">],</span> <span class="nb">list</span><span class="p">(</span><span class="nb">map</span><span class="p">(</span><span class="nb">float</span><span class="p">,</span> <span class="n">word_vec</span><span class="p">[</span><span class="mi">1</span><span class="p">:]))</span>
+        <span class="k">if</span> <span class="n">word</span> <span class="ow">in</span> <span class="n">dictionary</span><span class="o">.</span><span class="n">word2idx</span><span class="p">:</span>
+            <span class="n">weights</span><span class="p">[</span><span class="n">dictionary</span><span class="o">.</span><span class="n">word2idx</span><span class="p">[</span><span class="n">word</span><span class="p">]]</span> <span class="o">=</span> <span class="n">vec</span></pre></div>
+    </div>
+  </div>
+  <div class='clearall'></div>
+  <div class='section' id='section-21'>
+    <div class='docs'>
+      <div class='octowrap'>
+        <a class='octothorpe' href='#section-21'>#</a>
+      </div>
+      <p>Dump Dictionary and Weights to file</p>
+    </div>
+    <div class='code'>
+      <div class="highlight"><pre>    <span class="k">with</span> <span class="nb">open</span><span class="p">(</span><span class="n">dfile</span><span class="p">,</span> <span class="s1">&#39;wb&#39;</span><span class="p">)</span> <span class="k">as</span> <span class="n">f</span><span class="p">:</span>
+        <span class="n">pickle</span><span class="o">.</span><span class="n">dump</span><span class="p">(</span><span class="n">dictionary</span><span class="p">,</span> <span class="n">f</span><span class="p">)</span>
+    <span class="n">np</span><span class="o">.</span><span class="n">save</span><span class="p">(</span><span class="n">gfile</span><span class="p">,</span> <span class="n">weights</span><span class="p">)</span></pre></div>
+    </div>
+  </div>
+  <div class='clearall'></div>
+  <div class='section' id='section-22'>
+    <div class='docs'>
+      <div class='octowrap'>
+        <a class='octothorpe' href='#section-22'>#</a>
+      </div>
+      <p>Return Dictionary and Weights</p>
+    </div>
+    <div class='code'>
+      <div class="highlight"><pre>    <span class="k">return</span> <span class="n">dictionary</span><span class="p">,</span> <span class="n">weights</span></pre></div>
+    </div>
+  </div>
+  <div class='clearall'></div>
+  <div class='section' id='section-23'>
+    <div class='docs'>
+      <div class='octowrap'>
+        <a class='octothorpe' href='#section-23'>#</a>
+      </div>
+      <hr />
+    </div>
+    <div class='code'>
+      <div class="highlight"><pre></pre></div>
+    </div>
+  </div>
+  <div class='clearall'></div>
+  <div class='section' id='section-24'>
+    <div class='docs'>
+      <div class='octowrap'>
+        <a class='octothorpe' href='#section-24'>#</a>
+      </div>
+      <h3><span id="2.-preprocessing-answer-data" href="2.-preprocessing-answer-data"> 2. Preprocessing Answer Data </span></h3>
+    </div>
+    <div class='code'>
+      <div class="highlight"><pre></pre></div>
+    </div>
+  </div>
+  <div class='clearall'></div>
+  <div class='section' id='section-25'>
+    <div class='docs'>
+      <div class='octowrap'>
+        <a class='octothorpe' href='#section-25'>#</a>
+      </div>
+      <p><em>Assemble dictionaries mapping answer strings to indices and vice-versa, for priming the Softmax in the final layer of 
+the BUTD model.</em></p>
+<hr />
+    </div>
+    <div class='code'>
+      <div class="highlight"><pre></pre></div>
+    </div>
+  </div>
+  <div class='clearall'></div>
+  <div class='section' id='section-26'>
+    <div class='docs'>
+      <div class='octowrap'>
+        <a class='octothorpe' href='#section-26'>#</a>
+      </div>
+      <p>Create mapping from answers to labels</p>
+    </div>
+    <div class='code'>
+      <div class="highlight"><pre><span class="k">def</span> <span class="nf">gqa_create_answers</span><span class="p">(</span><span class="n">gqa_q</span><span class="o">=</span><span class="s1">&#39;data/GQA-Questions&#39;</span><span class="p">,</span> <span class="n">cache</span><span class="o">=</span><span class="s1">&#39;data/GQA-Cache&#39;</span><span class="p">):</span></pre></div>
+    </div>
+  </div>
+  <div class='clearall'></div>
+  <div class='section' id='section-27'>
+    <div class='docs'>
+      <div class='octowrap'>
+        <a class='octothorpe' href='#section-27'>#</a>
+      </div>
+      <p>Create File Paths and Load from Disk (if cached)</p>
+    </div>
+    <div class='code'>
+      <div class="highlight"><pre>    <span class="n">dfile</span> <span class="o">=</span> <span class="n">os</span><span class="o">.</span><span class="n">path</span><span class="o">.</span><span class="n">join</span><span class="p">(</span><span class="n">cache</span><span class="p">,</span> <span class="s1">&#39;answers.pkl&#39;</span><span class="p">)</span>
+    <span class="k">if</span> <span class="n">os</span><span class="o">.</span><span class="n">path</span><span class="o">.</span><span class="n">exists</span><span class="p">(</span><span class="n">dfile</span><span class="p">):</span>
+        <span class="k">with</span> <span class="nb">open</span><span class="p">(</span><span class="n">dfile</span><span class="p">,</span> <span class="s1">&#39;rb&#39;</span><span class="p">)</span> <span class="k">as</span> <span class="n">f</span><span class="p">:</span>
+            <span class="n">ans2label</span><span class="p">,</span> <span class="n">label2ans</span> <span class="o">=</span> <span class="n">pickle</span><span class="o">.</span><span class="n">load</span><span class="p">(</span><span class="n">f</span><span class="p">)</span>
+
+        <span class="k">return</span> <span class="n">ans2label</span><span class="p">,</span> <span class="n">label2ans</span>
+
+    <span class="n">ans2label</span><span class="p">,</span> <span class="n">label2ans</span> <span class="o">=</span> <span class="p">{},</span> <span class="p">[]</span>
+    <span class="n">questions</span> <span class="o">=</span> <span class="p">[</span><span class="s1">&#39;train_balanced_questions.json&#39;</span><span class="p">,</span> <span class="s1">&#39;val_balanced_questions.json&#39;</span><span class="p">,</span> <span class="s1">&#39;testdev_balanced_questions.json&#39;</span><span class="p">]</span></pre></div>
+    </div>
+  </div>
+  <div class='clearall'></div>
+  <div class='section' id='section-28'>
+    <div class='docs'>
+      <div class='octowrap'>
+        <a class='octothorpe' href='#section-28'>#</a>
+      </div>
+      <p>Iterate through Answer in Question Files and update Mapping</p>
+    </div>
+    <div class='code'>
+      <div class="highlight"><pre>    <span class="nb">print</span><span class="p">(</span><span class="s1">&#39;</span><span class="se">\t</span><span class="s1">[*] Creating Answer Labels from GQA Question/Answers...&#39;</span><span class="p">)</span>
+    <span class="k">for</span> <span class="n">qfile</span> <span class="ow">in</span> <span class="n">questions</span><span class="p">:</span>
+        <span class="n">qpath</span> <span class="o">=</span> <span class="n">os</span><span class="o">.</span><span class="n">path</span><span class="o">.</span><span class="n">join</span><span class="p">(</span><span class="n">gqa_q</span><span class="p">,</span> <span class="n">qfile</span><span class="p">)</span>
+        <span class="k">with</span> <span class="nb">open</span><span class="p">(</span><span class="n">qpath</span><span class="p">,</span> <span class="s1">&#39;r&#39;</span><span class="p">)</span> <span class="k">as</span> <span class="n">f</span><span class="p">:</span>
+            <span class="n">examples</span> <span class="o">=</span> <span class="n">json</span><span class="o">.</span><span class="n">load</span><span class="p">(</span><span class="n">f</span><span class="p">)</span>
+
+        <span class="k">for</span> <span class="n">ex_key</span> <span class="ow">in</span> <span class="n">examples</span><span class="p">:</span>
+            <span class="n">ex</span> <span class="o">=</span> <span class="n">examples</span><span class="p">[</span><span class="n">ex_key</span><span class="p">]</span>
+            <span class="k">if</span> <span class="ow">not</span> <span class="n">ex</span><span class="p">[</span><span class="s1">&#39;answer&#39;</span><span class="p">]</span><span class="o">.</span><span class="n">lower</span><span class="p">()</span> <span class="ow">in</span> <span class="n">ans2label</span><span class="p">:</span>
+                <span class="n">ans2label</span><span class="p">[</span><span class="n">ex</span><span class="p">[</span><span class="s1">&#39;answer&#39;</span><span class="p">]</span><span class="o">.</span><span class="n">lower</span><span class="p">()]</span> <span class="o">=</span> <span class="nb">len</span><span class="p">(</span><span class="n">ans2label</span><span class="p">)</span>
+                <span class="n">label2ans</span><span class="o">.</span><span class="n">append</span><span class="p">(</span><span class="n">ex</span><span class="p">[</span><span class="s1">&#39;answer&#39;</span><span class="p">])</span></pre></div>
+    </div>
+  </div>
+  <div class='clearall'></div>
+  <div class='section' id='section-29'>
+    <div class='docs'>
+      <div class='octowrap'>
+        <a class='octothorpe' href='#section-29'>#</a>
+      </div>
+      <p>Dump Dictionaries to File</p>
+    </div>
+    <div class='code'>
+      <div class="highlight"><pre>    <span class="k">with</span> <span class="nb">open</span><span class="p">(</span><span class="n">dfile</span><span class="p">,</span> <span class="s1">&#39;wb&#39;</span><span class="p">)</span> <span class="k">as</span> <span class="n">f</span><span class="p">:</span>
+        <span class="n">pickle</span><span class="o">.</span><span class="n">dump</span><span class="p">((</span><span class="n">ans2label</span><span class="p">,</span> <span class="n">label2ans</span><span class="p">),</span> <span class="n">f</span><span class="p">)</span>
+
+    <span class="k">return</span> <span class="n">ans2label</span><span class="p">,</span> <span class="n">label2ans</span></pre></div>
+    </div>
+  </div>
+  <div class='clearall'></div>
+  <div class='section' id='section-30'>
+    <div class='docs'>
+      <div class='octowrap'>
+        <a class='octothorpe' href='#section-30'>#</a>
+      </div>
+      <hr />
+    </div>
+    <div class='code'>
+      <div class="highlight"><pre></pre></div>
+    </div>
+  </div>
+  <div class='clearall'></div>
+  <div class='section' id='section-31'>
+    <div class='docs'>
+      <div class='octowrap'>
+        <a class='octothorpe' href='#section-31'>#</a>
+      </div>
+      <h3><span id="3.-preprocessing-image-features" href="3.-preprocessing-image-features"> 3. Preprocessing Image Features </span></h3>
+    </div>
+    <div class='code'>
+      <div class="highlight"><pre></pre></div>
+    </div>
+  </div>
+  <div class='clearall'></div>
+  <div class='section' id='section-32'>
+    <div class='docs'>
+      <div class='octowrap'>
+        <a class='octothorpe' href='#section-32'>#</a>
+      </div>
+      <p><em>Reads in a tsv file with pre-trained bottom up attention features and writes them to hdf5 file. Additionally builds
+image ID &ndash;&gt; Feature IDX Mapping.</em></p>
+<p><em>Hierarchy of HDF5 file:</em></p>
+<pre><code>{ 
+ 'image_features': num_images x num_boxes x 2048 
+ 'image_spatials': num_images x num_boxes x 6 
+ 'image_bb': num_images x num_boxes x 4 
+}
+</code></pre>
+<hr />
+    </div>
+    <div class='code'>
+      <div class="highlight"><pre></pre></div>
+    </div>
+  </div>
+  <div class='clearall'></div>
+  <div class='section' id='section-33'>
+    <div class='docs'>
+      <div class='octowrap'>
+        <a class='octothorpe' href='#section-33'>#</a>
+      </div>
+      <p>Set CSV Field Size Limit (Big TSV Files&hellip;)</p>
+    </div>
+    <div class='code'>
+      <div class="highlight"><pre><span class="n">csv</span><span class="o">.</span><span class="n">field_size_limit</span><span class="p">(</span><span class="n">sys</span><span class="o">.</span><span class="n">maxsize</span><span class="p">)</span>
+
+<span class="n">FIELDNAMES</span> <span class="o">=</span> <span class="p">[</span><span class="s2">&quot;img_id&quot;</span><span class="p">,</span> <span class="s2">&quot;img_h&quot;</span><span class="p">,</span> <span class="s2">&quot;img_w&quot;</span><span class="p">,</span> <span class="s2">&quot;objects_id&quot;</span><span class="p">,</span> <span class="s2">&quot;objects_conf&quot;</span><span class="p">,</span> <span class="s2">&quot;attrs_id&quot;</span><span class="p">,</span> <span class="s2">&quot;attrs_conf&quot;</span><span class="p">,</span> <span class="s2">&quot;num_boxes&quot;</span><span class="p">,</span> <span class="s2">&quot;boxes&quot;</span><span class="p">,</span>
+              <span class="s2">&quot;features&quot;</span><span class="p">]</span>
+<span class="n">NUM_FIXED_BOXES</span> <span class="o">=</span> <span class="mi">36</span>
+<span class="n">FEATURE_LENGTH</span> <span class="o">=</span> <span class="mi">2048</span></pre></div>
+    </div>
+  </div>
+  <div class='clearall'></div>
+  <div class='section' id='section-34'>
+    <div class='docs'>
+      <div class='octowrap'>
+        <a class='octothorpe' href='#section-34'>#</a>
+      </div>
+      <p>Iterate through BUTD TSV and Build HDF5 Files with Bounding Box Features, Image ID &ndash;&gt; IDX Mappings</p>
+    </div>
+    <div class='code'>
+      <div class="highlight"><pre><span class="k">def</span> <span class="nf">gqa_create_image_features</span><span class="p">(</span><span class="n">gqa_f</span><span class="o">=</span><span class="s1">&#39;data/GQA-Features&#39;</span><span class="p">,</span> <span class="n">cache</span><span class="o">=</span><span class="s1">&#39;data/GQA-Cache&#39;</span><span class="p">):</span></pre></div>
+    </div>
+  </div>
+  <div class='clearall'></div>
+  <div class='section' id='section-35'>
+    <div class='docs'>
+      <div class='octowrap'>
+        <a class='octothorpe' href='#section-35'>#</a>
+      </div>
+      
+    </div>
+    <div class='code'>
+      <div class="highlight"><pre>    <span class="nb">print</span><span class="p">(</span><span class="s1">&#39;</span><span class="se">\t</span><span class="s1">[*] Setting up HDF5 Files for Image/Object Features...&#39;</span><span class="p">)</span></pre></div>
+    </div>
+  </div>
+  <div class='clearall'></div>
+  <div class='section' id='section-36'>
+    <div class='docs'>
+      <div class='octowrap'>
+        <a class='octothorpe' href='#section-36'>#</a>
+      </div>
+      <p>Create Trackers for Image IDX &ndash;&gt; Index</p>
+    </div>
+    <div class='code'>
+      <div class="highlight"><pre>    <span class="n">trainval_indices</span><span class="p">,</span> <span class="n">testdev_indices</span> <span class="o">=</span> <span class="p">{},</span> <span class="p">{}</span>
+    <span class="n">tv_file</span> <span class="o">=</span> <span class="n">os</span><span class="o">.</span><span class="n">path</span><span class="o">.</span><span class="n">join</span><span class="p">(</span><span class="n">cache</span><span class="p">,</span> <span class="s1">&#39;trainval36.hdf5&#39;</span><span class="p">)</span>
+    <span class="n">td_file</span> <span class="o">=</span> <span class="n">os</span><span class="o">.</span><span class="n">path</span><span class="o">.</span><span class="n">join</span><span class="p">(</span><span class="n">cache</span><span class="p">,</span> <span class="s1">&#39;testdev36.hdf5&#39;</span><span class="p">)</span>
+
+    <span class="n">tv_idxfile</span> <span class="o">=</span> <span class="n">os</span><span class="o">.</span><span class="n">path</span><span class="o">.</span><span class="n">join</span><span class="p">(</span><span class="n">cache</span><span class="p">,</span> <span class="s1">&#39;trainval36_img2idx.pkl&#39;</span><span class="p">)</span>
+    <span class="n">td_idxfile</span> <span class="o">=</span> <span class="n">os</span><span class="o">.</span><span class="n">path</span><span class="o">.</span><span class="n">join</span><span class="p">(</span><span class="n">cache</span><span class="p">,</span> <span class="s1">&#39;testdev36_img2idx.pkl&#39;</span><span class="p">)</span>
+
+    <span class="k">if</span> <span class="n">os</span><span class="o">.</span><span class="n">path</span><span class="o">.</span><span class="n">exists</span><span class="p">(</span><span class="n">tv_file</span><span class="p">)</span> <span class="ow">and</span> <span class="n">os</span><span class="o">.</span><span class="n">path</span><span class="o">.</span><span class="n">exists</span><span class="p">(</span><span class="n">td_file</span><span class="p">)</span> <span class="ow">and</span> <span class="n">os</span><span class="o">.</span><span class="n">path</span><span class="o">.</span><span class="n">exists</span><span class="p">(</span><span class="n">tv_idxfile</span><span class="p">)</span> <span class="ow">and</span> \
+            <span class="n">os</span><span class="o">.</span><span class="n">path</span><span class="o">.</span><span class="n">exists</span><span class="p">(</span><span class="n">td_idxfile</span><span class="p">):</span>
+
+        <span class="k">with</span> <span class="nb">open</span><span class="p">(</span><span class="n">tv_idxfile</span><span class="p">,</span> <span class="s1">&#39;rb&#39;</span><span class="p">)</span> <span class="k">as</span> <span class="n">f</span><span class="p">:</span>
+            <span class="n">trainval_indices</span> <span class="o">=</span> <span class="n">pickle</span><span class="o">.</span><span class="n">load</span><span class="p">(</span><span class="n">f</span><span class="p">)</span>
+
+        <span class="k">with</span> <span class="nb">open</span><span class="p">(</span><span class="n">td_idxfile</span><span class="p">,</span> <span class="s1">&#39;rb&#39;</span><span class="p">)</span> <span class="k">as</span> <span class="n">f</span><span class="p">:</span>
+            <span class="n">testdev_indices</span> <span class="o">=</span> <span class="n">pickle</span><span class="o">.</span><span class="n">load</span><span class="p">(</span><span class="n">f</span><span class="p">)</span>
+
+        <span class="k">return</span> <span class="n">trainval_indices</span><span class="p">,</span> <span class="n">testdev_indices</span>
+
+    <span class="k">with</span> <span class="n">h5py</span><span class="o">.</span><span class="n">File</span><span class="p">(</span><span class="n">tv_file</span><span class="p">,</span> <span class="s1">&#39;w&#39;</span><span class="p">)</span> <span class="k">as</span> <span class="n">h_trainval</span><span class="p">,</span> <span class="n">h5py</span><span class="o">.</span><span class="n">File</span><span class="p">(</span><span class="n">td_file</span><span class="p">,</span> <span class="s1">&#39;w&#39;</span><span class="p">)</span> <span class="k">as</span> <span class="n">h_testdev</span><span class="p">:</span></pre></div>
+    </div>
+  </div>
+  <div class='clearall'></div>
+  <div class='section' id='section-37'>
+    <div class='docs'>
+      <div class='octowrap'>
+        <a class='octothorpe' href='#section-37'>#</a>
+      </div>
+      <p>Get Number of Images in each Split</p>
+    </div>
+    <div class='code'>
+      <div class="highlight"><pre>        <span class="k">with</span> <span class="nb">open</span><span class="p">(</span><span class="n">os</span><span class="o">.</span><span class="n">path</span><span class="o">.</span><span class="n">join</span><span class="p">(</span><span class="n">gqa_f</span><span class="p">,</span> <span class="s1">&#39;vg_gqa_obj36.tsv&#39;</span><span class="p">),</span> <span class="s1">&#39;r&#39;</span><span class="p">)</span> <span class="k">as</span> <span class="n">f</span><span class="p">:</span>
+            <span class="n">ntrainval</span> <span class="o">=</span> <span class="nb">len</span><span class="p">(</span><span class="n">f</span><span class="o">.</span><span class="n">readlines</span><span class="p">())</span>
+
+        <span class="k">with</span> <span class="nb">open</span><span class="p">(</span><span class="n">os</span><span class="o">.</span><span class="n">path</span><span class="o">.</span><span class="n">join</span><span class="p">(</span><span class="n">gqa_f</span><span class="p">,</span> <span class="s1">&#39;gqa_testdev_obj36.tsv&#39;</span><span class="p">),</span> <span class="s1">&#39;r&#39;</span><span class="p">)</span> <span class="k">as</span> <span class="n">f</span><span class="p">:</span>
+            <span class="n">ntestdev</span> <span class="o">=</span> <span class="nb">len</span><span class="p">(</span><span class="n">f</span><span class="o">.</span><span class="n">readlines</span><span class="p">())</span></pre></div>
+    </div>
+  </div>
+  <div class='clearall'></div>
+  <div class='section' id='section-38'>
+    <div class='docs'>
+      <div class='octowrap'>
+        <a class='octothorpe' href='#section-38'>#</a>
+      </div>
+      <p>Setup HDF5 Files</p>
+    </div>
+    <div class='code'>
+      <div class="highlight"><pre>        <span class="n">trainval_img_features</span> <span class="o">=</span> <span class="n">h_trainval</span><span class="o">.</span><span class="n">create_dataset</span><span class="p">(</span><span class="s1">&#39;image_features&#39;</span><span class="p">,</span> <span class="p">(</span><span class="n">ntrainval</span><span class="p">,</span> <span class="n">NUM_FIXED_BOXES</span><span class="p">,</span>
+                                                                             <span class="n">FEATURE_LENGTH</span><span class="p">),</span> <span class="s1">&#39;f&#39;</span><span class="p">)</span>
+        <span class="n">trainval_img_bb</span> <span class="o">=</span> <span class="n">h_trainval</span><span class="o">.</span><span class="n">create_dataset</span><span class="p">(</span><span class="s1">&#39;image_bb&#39;</span><span class="p">,</span> <span class="p">(</span><span class="n">ntrainval</span><span class="p">,</span> <span class="n">NUM_FIXED_BOXES</span><span class="p">,</span> <span class="mi">4</span><span class="p">),</span> <span class="s1">&#39;f&#39;</span><span class="p">)</span>
+        <span class="n">trainval_spatial_features</span> <span class="o">=</span> <span class="n">h_trainval</span><span class="o">.</span><span class="n">create_dataset</span><span class="p">(</span><span class="s1">&#39;spatial_features&#39;</span><span class="p">,</span> <span class="p">(</span><span class="n">ntrainval</span><span class="p">,</span> <span class="n">NUM_FIXED_BOXES</span><span class="p">,</span> <span class="mi">6</span><span class="p">),</span> <span class="s1">&#39;f&#39;</span><span class="p">)</span>
+
+        <span class="n">testdev_img_features</span> <span class="o">=</span> <span class="n">h_testdev</span><span class="o">.</span><span class="n">create_dataset</span><span class="p">(</span><span class="s1">&#39;image_features&#39;</span><span class="p">,</span> <span class="p">(</span><span class="n">ntestdev</span><span class="p">,</span> <span class="n">NUM_FIXED_BOXES</span><span class="p">,</span> <span class="n">FEATURE_LENGTH</span><span class="p">),</span>
+                                                        <span class="s1">&#39;f&#39;</span><span class="p">)</span>
+        <span class="n">testdev_img_bb</span> <span class="o">=</span> <span class="n">h_testdev</span><span class="o">.</span><span class="n">create_dataset</span><span class="p">(</span><span class="s1">&#39;image_bb&#39;</span><span class="p">,</span> <span class="p">(</span><span class="n">ntestdev</span><span class="p">,</span> <span class="n">NUM_FIXED_BOXES</span><span class="p">,</span> <span class="mi">4</span><span class="p">),</span> <span class="s1">&#39;f&#39;</span><span class="p">)</span>
+        <span class="n">testdev_spatial_features</span> <span class="o">=</span> <span class="n">h_testdev</span><span class="o">.</span><span class="n">create_dataset</span><span class="p">(</span><span class="s1">&#39;spatial_features&#39;</span><span class="p">,</span> <span class="p">(</span><span class="n">ntestdev</span><span class="p">,</span> <span class="n">NUM_FIXED_BOXES</span><span class="p">,</span> <span class="mi">6</span><span class="p">),</span> <span class="s1">&#39;f&#39;</span><span class="p">)</span></pre></div>
+    </div>
+  </div>
+  <div class='clearall'></div>
+  <div class='section' id='section-39'>
+    <div class='docs'>
+      <div class='octowrap'>
+        <a class='octothorpe' href='#section-39'>#</a>
+      </div>
+      <p>Start Iterating through TSV</p>
+    </div>
+    <div class='code'>
+      <div class="highlight"><pre>        <span class="nb">print</span><span class="p">(</span><span class="s1">&#39;</span><span class="se">\t</span><span class="s1">[*] Reading Train-Val TSV File and Populating HDF5 File...&#39;</span><span class="p">)</span>
+        <span class="n">trainval_counter</span><span class="p">,</span> <span class="n">testdev_counter</span> <span class="o">=</span> <span class="mi">0</span><span class="p">,</span> <span class="mi">0</span>
+        <span class="k">with</span> <span class="nb">open</span><span class="p">(</span><span class="n">os</span><span class="o">.</span><span class="n">path</span><span class="o">.</span><span class="n">join</span><span class="p">(</span><span class="n">gqa_f</span><span class="p">,</span> <span class="s1">&#39;vg_gqa_obj36.tsv&#39;</span><span class="p">),</span> <span class="s1">&#39;r&#39;</span><span class="p">)</span> <span class="k">as</span> <span class="n">tsv</span><span class="p">:</span>
+            <span class="n">reader</span> <span class="o">=</span> <span class="n">csv</span><span class="o">.</span><span class="n">DictReader</span><span class="p">(</span><span class="n">tsv</span><span class="p">,</span> <span class="n">delimiter</span><span class="o">=</span><span class="s1">&#39;</span><span class="se">\t</span><span class="s1">&#39;</span><span class="p">,</span> <span class="n">fieldnames</span><span class="o">=</span><span class="n">FIELDNAMES</span><span class="p">)</span>
+            <span class="k">for</span> <span class="n">item</span> <span class="ow">in</span> <span class="n">reader</span><span class="p">:</span>
+                <span class="n">item</span><span class="p">[</span><span class="s1">&#39;num_boxes&#39;</span><span class="p">]</span> <span class="o">=</span> <span class="nb">int</span><span class="p">(</span><span class="n">item</span><span class="p">[</span><span class="s1">&#39;num_boxes&#39;</span><span class="p">])</span>
+                <span class="n">image_id</span> <span class="o">=</span> <span class="n">item</span><span class="p">[</span><span class="s1">&#39;img_id&#39;</span><span class="p">]</span>
+                <span class="n">image_w</span> <span class="o">=</span> <span class="nb">float</span><span class="p">(</span><span class="n">item</span><span class="p">[</span><span class="s1">&#39;img_w&#39;</span><span class="p">])</span>
+                <span class="n">image_h</span> <span class="o">=</span> <span class="nb">float</span><span class="p">(</span><span class="n">item</span><span class="p">[</span><span class="s1">&#39;img_h&#39;</span><span class="p">])</span>
+                <span class="n">bb</span> <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">frombuffer</span><span class="p">(</span><span class="n">base64</span><span class="o">.</span><span class="n">b64decode</span><span class="p">(</span><span class="n">item</span><span class="p">[</span><span class="s1">&#39;boxes&#39;</span><span class="p">]),</span> <span class="n">dtype</span><span class="o">=</span><span class="n">np</span><span class="o">.</span><span class="n">float32</span><span class="p">)</span><span class="o">.</span><span class="n">reshape</span><span class="p">((</span><span class="n">item</span><span class="p">[</span><span class="s1">&#39;num_boxes&#39;</span><span class="p">],</span> <span class="o">-</span><span class="mi">1</span><span class="p">))</span>
+
+                <span class="n">box_width</span> <span class="o">=</span> <span class="n">bb</span><span class="p">[:,</span> <span class="mi">2</span><span class="p">]</span> <span class="o">-</span> <span class="n">bb</span><span class="p">[:,</span> <span class="mi">0</span><span class="p">]</span>
+                <span class="n">box_height</span> <span class="o">=</span> <span class="n">bb</span><span class="p">[:,</span> <span class="mi">3</span><span class="p">]</span> <span class="o">-</span> <span class="n">bb</span><span class="p">[:,</span> <span class="mi">1</span><span class="p">]</span>
+                <span class="n">scaled_width</span> <span class="o">=</span> <span class="n">box_width</span> <span class="o">/</span> <span class="n">image_w</span>
+                <span class="n">scaled_height</span> <span class="o">=</span> <span class="n">box_height</span> <span class="o">/</span> <span class="n">image_h</span>
+                <span class="n">scaled_x</span> <span class="o">=</span> <span class="n">bb</span><span class="p">[:,</span> <span class="mi">0</span><span class="p">]</span> <span class="o">/</span> <span class="n">image_w</span>
+                <span class="n">scaled_y</span> <span class="o">=</span> <span class="n">bb</span><span class="p">[:,</span> <span class="mi">1</span><span class="p">]</span> <span class="o">/</span> <span class="n">image_h</span>
+
+                <span class="n">scaled_width</span> <span class="o">=</span> <span class="n">scaled_width</span><span class="p">[</span><span class="o">...</span><span class="p">,</span> <span class="n">np</span><span class="o">.</span><span class="n">newaxis</span><span class="p">]</span>
+                <span class="n">scaled_height</span> <span class="o">=</span> <span class="n">scaled_height</span><span class="p">[</span><span class="o">...</span><span class="p">,</span> <span class="n">np</span><span class="o">.</span><span class="n">newaxis</span><span class="p">]</span>
+                <span class="n">scaled_x</span> <span class="o">=</span> <span class="n">scaled_x</span><span class="p">[</span><span class="o">...</span><span class="p">,</span> <span class="n">np</span><span class="o">.</span><span class="n">newaxis</span><span class="p">]</span>
+                <span class="n">scaled_y</span> <span class="o">=</span> <span class="n">scaled_y</span><span class="p">[</span><span class="o">...</span><span class="p">,</span> <span class="n">np</span><span class="o">.</span><span class="n">newaxis</span><span class="p">]</span>
+
+                <span class="n">spatial_features</span> <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">concatenate</span><span class="p">(</span>
+                    <span class="p">(</span><span class="n">scaled_x</span><span class="p">,</span>
+                     <span class="n">scaled_y</span><span class="p">,</span>
+                     <span class="n">scaled_x</span> <span class="o">+</span> <span class="n">scaled_width</span><span class="p">,</span>
+                     <span class="n">scaled_y</span> <span class="o">+</span> <span class="n">scaled_height</span><span class="p">,</span>
+                     <span class="n">scaled_width</span><span class="p">,</span>
+                     <span class="n">scaled_height</span><span class="p">),</span>
+                    <span class="n">axis</span><span class="o">=</span><span class="mi">1</span><span class="p">)</span>
+
+                <span class="n">trainval_indices</span><span class="p">[</span><span class="n">image_id</span><span class="p">]</span> <span class="o">=</span> <span class="n">trainval_counter</span>
+                <span class="n">trainval_img_bb</span><span class="p">[</span><span class="n">trainval_counter</span><span class="p">,</span> <span class="p">:,</span> <span class="p">:]</span> <span class="o">=</span> <span class="n">bb</span>
+                <span class="n">trainval_img_features</span><span class="p">[</span><span class="n">trainval_counter</span><span class="p">,</span> <span class="p">:,</span> <span class="p">:]</span> <span class="o">=</span> \
+                    <span class="n">np</span><span class="o">.</span><span class="n">frombuffer</span><span class="p">(</span><span class="n">base64</span><span class="o">.</span><span class="n">b64decode</span><span class="p">(</span><span class="n">item</span><span class="p">[</span><span class="s1">&#39;features&#39;</span><span class="p">]),</span> <span class="n">dtype</span><span class="o">=</span><span class="n">np</span><span class="o">.</span><span class="n">float32</span><span class="p">)</span><span class="o">.</span><span class="n">reshape</span><span class="p">((</span><span class="n">item</span><span class="p">[</span><span class="s1">&#39;num_boxes&#39;</span><span class="p">],</span> <span class="o">-</span><span class="mi">1</span><span class="p">))</span>
+                <span class="n">trainval_spatial_features</span><span class="p">[</span><span class="n">trainval_counter</span><span class="p">,</span> <span class="p">:,</span> <span class="p">:]</span> <span class="o">=</span> <span class="n">spatial_features</span>
+                <span class="n">trainval_counter</span> <span class="o">+=</span> <span class="mi">1</span>
+
+        <span class="nb">print</span><span class="p">(</span><span class="s1">&#39;</span><span class="se">\t</span><span class="s1">[*] Reading Test-Dev TSV File and Populating HDF5 File...&#39;</span><span class="p">)</span>
+        <span class="k">with</span> <span class="nb">open</span><span class="p">(</span><span class="n">os</span><span class="o">.</span><span class="n">path</span><span class="o">.</span><span class="n">join</span><span class="p">(</span><span class="n">gqa_f</span><span class="p">,</span> <span class="s1">&#39;gqa_testdev_obj36.tsv&#39;</span><span class="p">),</span> <span class="s1">&#39;r&#39;</span><span class="p">)</span> <span class="k">as</span> <span class="n">tsv</span><span class="p">:</span>
+            <span class="n">reader</span> <span class="o">=</span> <span class="n">csv</span><span class="o">.</span><span class="n">DictReader</span><span class="p">(</span><span class="n">tsv</span><span class="p">,</span> <span class="n">delimiter</span><span class="o">=</span><span class="s1">&#39;</span><span class="se">\t</span><span class="s1">&#39;</span><span class="p">,</span> <span class="n">fieldnames</span><span class="o">=</span><span class="n">FIELDNAMES</span><span class="p">)</span>
+            <span class="k">for</span> <span class="n">item</span> <span class="ow">in</span> <span class="n">reader</span><span class="p">:</span>
+                <span class="n">item</span><span class="p">[</span><span class="s1">&#39;num_boxes&#39;</span><span class="p">]</span> <span class="o">=</span> <span class="nb">int</span><span class="p">(</span><span class="n">item</span><span class="p">[</span><span class="s1">&#39;num_boxes&#39;</span><span class="p">])</span>
+                <span class="n">image_id</span> <span class="o">=</span> <span class="n">item</span><span class="p">[</span><span class="s1">&#39;img_id&#39;</span><span class="p">]</span>
+                <span class="n">image_w</span> <span class="o">=</span> <span class="nb">float</span><span class="p">(</span><span class="n">item</span><span class="p">[</span><span class="s1">&#39;img_w&#39;</span><span class="p">])</span>
+                <span class="n">image_h</span> <span class="o">=</span> <span class="nb">float</span><span class="p">(</span><span class="n">item</span><span class="p">[</span><span class="s1">&#39;img_h&#39;</span><span class="p">])</span>
+                <span class="n">bb</span> <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">frombuffer</span><span class="p">(</span><span class="n">base64</span><span class="o">.</span><span class="n">b64decode</span><span class="p">(</span><span class="n">item</span><span class="p">[</span><span class="s1">&#39;boxes&#39;</span><span class="p">]),</span> <span class="n">dtype</span><span class="o">=</span><span class="n">np</span><span class="o">.</span><span class="n">float32</span><span class="p">)</span><span class="o">.</span><span class="n">reshape</span><span class="p">((</span><span class="n">item</span><span class="p">[</span><span class="s1">&#39;num_boxes&#39;</span><span class="p">],</span> <span class="o">-</span><span class="mi">1</span><span class="p">))</span>
+
+                <span class="n">box_width</span> <span class="o">=</span> <span class="n">bb</span><span class="p">[:,</span> <span class="mi">2</span><span class="p">]</span> <span class="o">-</span> <span class="n">bb</span><span class="p">[:,</span> <span class="mi">0</span><span class="p">]</span>
+                <span class="n">box_height</span> <span class="o">=</span> <span class="n">bb</span><span class="p">[:,</span> <span class="mi">3</span><span class="p">]</span> <span class="o">-</span> <span class="n">bb</span><span class="p">[:,</span> <span class="mi">1</span><span class="p">]</span>
+                <span class="n">scaled_width</span> <span class="o">=</span> <span class="n">box_width</span> <span class="o">/</span> <span class="n">image_w</span>
+                <span class="n">scaled_height</span> <span class="o">=</span> <span class="n">box_height</span> <span class="o">/</span> <span class="n">image_h</span>
+                <span class="n">scaled_x</span> <span class="o">=</span> <span class="n">bb</span><span class="p">[:,</span> <span class="mi">0</span><span class="p">]</span> <span class="o">/</span> <span class="n">image_w</span>
+                <span class="n">scaled_y</span> <span class="o">=</span> <span class="n">bb</span><span class="p">[:,</span> <span class="mi">1</span><span class="p">]</span> <span class="o">/</span> <span class="n">image_h</span>
+
+                <span class="n">scaled_width</span> <span class="o">=</span> <span class="n">scaled_width</span><span class="p">[</span><span class="o">...</span><span class="p">,</span> <span class="n">np</span><span class="o">.</span><span class="n">newaxis</span><span class="p">]</span>
+                <span class="n">scaled_height</span> <span class="o">=</span> <span class="n">scaled_height</span><span class="p">[</span><span class="o">...</span><span class="p">,</span> <span class="n">np</span><span class="o">.</span><span class="n">newaxis</span><span class="p">]</span>
+                <span class="n">scaled_x</span> <span class="o">=</span> <span class="n">scaled_x</span><span class="p">[</span><span class="o">...</span><span class="p">,</span> <span class="n">np</span><span class="o">.</span><span class="n">newaxis</span><span class="p">]</span>
+                <span class="n">scaled_y</span> <span class="o">=</span> <span class="n">scaled_y</span><span class="p">[</span><span class="o">...</span><span class="p">,</span> <span class="n">np</span><span class="o">.</span><span class="n">newaxis</span><span class="p">]</span>
+
+                <span class="n">spatial_features</span> <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">concatenate</span><span class="p">(</span>
+                    <span class="p">(</span><span class="n">scaled_x</span><span class="p">,</span>
+                     <span class="n">scaled_y</span><span class="p">,</span>
+                     <span class="n">scaled_x</span> <span class="o">+</span> <span class="n">scaled_width</span><span class="p">,</span>
+                     <span class="n">scaled_y</span> <span class="o">+</span> <span class="n">scaled_height</span><span class="p">,</span>
+                     <span class="n">scaled_width</span><span class="p">,</span>
+                     <span class="n">scaled_height</span><span class="p">),</span>
+                    <span class="n">axis</span><span class="o">=</span><span class="mi">1</span><span class="p">)</span>
+
+                <span class="n">testdev_indices</span><span class="p">[</span><span class="n">image_id</span><span class="p">]</span> <span class="o">=</span> <span class="n">testdev_counter</span>
+                <span class="n">testdev_img_bb</span><span class="p">[</span><span class="n">testdev_counter</span><span class="p">,</span> <span class="p">:,</span> <span class="p">:]</span> <span class="o">=</span> <span class="n">bb</span>
+                <span class="n">testdev_img_features</span><span class="p">[</span><span class="n">testdev_counter</span><span class="p">,</span> <span class="p">:,</span> <span class="p">:]</span> <span class="o">=</span> \
+                    <span class="n">np</span><span class="o">.</span><span class="n">frombuffer</span><span class="p">(</span><span class="n">base64</span><span class="o">.</span><span class="n">b64decode</span><span class="p">(</span><span class="n">item</span><span class="p">[</span><span class="s1">&#39;features&#39;</span><span class="p">]),</span> <span class="n">dtype</span><span class="o">=</span><span class="n">np</span><span class="o">.</span><span class="n">float32</span><span class="p">)</span><span class="o">.</span><span class="n">reshape</span><span class="p">((</span><span class="n">item</span><span class="p">[</span><span class="s1">&#39;num_boxes&#39;</span><span class="p">],</span> <span class="o">-</span><span class="mi">1</span><span class="p">))</span>
+                <span class="n">testdev_spatial_features</span><span class="p">[</span><span class="n">testdev_counter</span><span class="p">,</span> <span class="p">:,</span> <span class="p">:]</span> <span class="o">=</span> <span class="n">spatial_features</span>
+                <span class="n">testdev_counter</span> <span class="o">+=</span> <span class="mi">1</span></pre></div>
+    </div>
+  </div>
+  <div class='clearall'></div>
+  <div class='section' id='section-40'>
+    <div class='docs'>
+      <div class='octowrap'>
+        <a class='octothorpe' href='#section-40'>#</a>
+      </div>
+      <p>Dump TrainVal and TestDev Indices to File</p>
+    </div>
+    <div class='code'>
+      <div class="highlight"><pre>    <span class="k">with</span> <span class="nb">open</span><span class="p">(</span><span class="n">tv_idxfile</span><span class="p">,</span> <span class="s1">&#39;wb&#39;</span><span class="p">)</span> <span class="k">as</span> <span class="n">f</span><span class="p">:</span>
+        <span class="n">pickle</span><span class="o">.</span><span class="n">dump</span><span class="p">(</span><span class="n">trainval_indices</span><span class="p">,</span> <span class="n">f</span><span class="p">)</span>
+
+    <span class="k">with</span> <span class="nb">open</span><span class="p">(</span><span class="n">td_idxfile</span><span class="p">,</span> <span class="s1">&#39;wb&#39;</span><span class="p">)</span> <span class="k">as</span> <span class="n">f</span><span class="p">:</span>
+        <span class="n">pickle</span><span class="o">.</span><span class="n">dump</span><span class="p">(</span><span class="n">testdev_indices</span><span class="p">,</span> <span class="n">f</span><span class="p">)</span>
+
+    <span class="k">return</span> <span class="n">trainval_indices</span><span class="p">,</span> <span class="n">testdev_indices</span></pre></div>
+    </div>
+  </div>
+  <div class='clearall'></div>
+  <div class='section' id='section-41'>
+    <div class='docs'>
+      <div class='octowrap'>
+        <a class='octothorpe' href='#section-41'>#</a>
+      </div>
+      <hr />
+    </div>
+    <div class='code'>
+      <div class="highlight"><pre></pre></div>
+    </div>
+  </div>
+  <div class='clearall'></div>
+  <div class='section' id='section-42'>
+    <div class='docs'>
+      <div class='octowrap'>
+        <a class='octothorpe' href='#section-42'>#</a>
+      </div>
+      <h3><span id="4.-dataset-assembly" href="4.-dataset-assembly"> 4. Dataset Assembly </span></h3>
+    </div>
+    <div class='code'>
+      <div class="highlight"><pre></pre></div>
+    </div>
+  </div>
+  <div class='clearall'></div>
+  <div class='section' id='section-43'>
+    <div class='docs'>
+      <div class='octowrap'>
+        <a class='octothorpe' href='#section-43'>#</a>
+      </div>
+      <p><em>Define GQA Feature Dataset <code>torch.Dataset</code>, with utilities for loading image features from HDF5 files, and tensorizing
+data.</em></p>
+<hr />
+    </div>
+    <div class='code'>
+      <div class="highlight"><pre></pre></div>
+    </div>
+  </div>
+  <div class='clearall'></div>
+  <div class='section' id='section-44'>
+    <div class='docs'>
+      <div class='octowrap'>
+        <a class='octothorpe' href='#section-44'>#</a>
+      </div>
+      
+    </div>
+    <div class='code'>
+      <div class="highlight"><pre><span class="k">class</span> <span class="nc">GQAFeatureDataset</span><span class="p">(</span><span class="n">Dataset</span><span class="p">):</span></pre></div>
+    </div>
+  </div>
+  <div class='clearall'></div>
+  <div class='section' id='section-45'>
+    <div class='docs'>
+      <div class='octowrap'>
+        <a class='octothorpe' href='#section-45'>#</a>
+      </div>
+      
+    </div>
+    <div class='code'>
+      <div class="highlight"><pre>    <span class="k">def</span> <span class="fm">__init__</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">dictionary</span><span class="p">,</span> <span class="n">ans2label</span><span class="p">,</span> <span class="n">label2ans</span><span class="p">,</span> <span class="n">img2idx</span><span class="p">,</span> <span class="n">gqa_q</span><span class="o">=</span><span class="s1">&#39;data/GQA-Questions&#39;</span><span class="p">,</span> <span class="n">cache</span><span class="o">=</span><span class="s1">&#39;data/GQA-Cache&#39;</span><span class="p">,</span>
+                 <span class="n">mode</span><span class="o">=</span><span class="s1">&#39;train&#39;</span><span class="p">):</span>
+        <span class="nb">super</span><span class="p">(</span><span class="n">GQAFeatureDataset</span><span class="p">,</span> <span class="bp">self</span><span class="p">)</span><span class="o">.</span><span class="fm">__init__</span><span class="p">()</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">dictionary</span><span class="p">,</span> <span class="bp">self</span><span class="o">.</span><span class="n">ans2label</span><span class="p">,</span> <span class="bp">self</span><span class="o">.</span><span class="n">label2ans</span><span class="p">,</span> <span class="bp">self</span><span class="o">.</span><span class="n">img2idx</span> <span class="o">=</span> <span class="n">dictionary</span><span class="p">,</span> <span class="n">ans2label</span><span class="p">,</span> <span class="n">label2ans</span><span class="p">,</span> <span class="n">img2idx</span></pre></div>
+    </div>
+  </div>
+  <div class='clearall'></div>
+  <div class='section' id='section-46'>
+    <div class='docs'>
+      <div class='octowrap'>
+        <a class='octothorpe' href='#section-46'>#</a>
+      </div>
+      <p>Load HDF5 Image Features</p>
+    </div>
+    <div class='code'>
+      <div class="highlight"><pre>        <span class="nb">print</span><span class="p">(</span><span class="s1">&#39;</span><span class="se">\t</span><span class="s1">[*] Loading HDF5 Features...&#39;</span><span class="p">)</span>
+        <span class="k">if</span> <span class="n">mode</span> <span class="ow">in</span> <span class="p">[</span><span class="s1">&#39;train&#39;</span><span class="p">,</span> <span class="s1">&#39;val&#39;</span><span class="p">]:</span>
+            <span class="n">prefix</span> <span class="o">=</span> <span class="s1">&#39;trainval&#39;</span>
+        <span class="k">else</span><span class="p">:</span>
+            <span class="n">prefix</span> <span class="o">=</span> <span class="s1">&#39;testdev&#39;</span>
+
+        <span class="bp">self</span><span class="o">.</span><span class="n">v_dim</span><span class="p">,</span> <span class="bp">self</span><span class="o">.</span><span class="n">s_dim</span> <span class="o">=</span> <span class="mi">2048</span><span class="p">,</span> <span class="mi">6</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">hf</span> <span class="o">=</span> <span class="n">h5py</span><span class="o">.</span><span class="n">File</span><span class="p">(</span><span class="n">os</span><span class="o">.</span><span class="n">path</span><span class="o">.</span><span class="n">join</span><span class="p">(</span><span class="n">cache</span><span class="p">,</span> <span class="s1">&#39;</span><span class="si">%s</span><span class="s1">36.hdf5&#39;</span> <span class="o">%</span> <span class="n">prefix</span><span class="p">),</span> <span class="s1">&#39;r&#39;</span><span class="p">)</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">features</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">hf</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s1">&#39;image_features&#39;</span><span class="p">)</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">spatials</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">hf</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s1">&#39;spatial_features&#39;</span><span class="p">)</span></pre></div>
+    </div>
+  </div>
+  <div class='clearall'></div>
+  <div class='section' id='section-47'>
+    <div class='docs'>
+      <div class='octowrap'>
+        <a class='octothorpe' href='#section-47'>#</a>
+      </div>
+      <p>Create the Dataset Entries by Iterating through the Data</p>
+    </div>
+    <div class='code'>
+      <div class="highlight"><pre>        <span class="bp">self</span><span class="o">.</span><span class="n">entries</span> <span class="o">=</span> <span class="n">load_dataset</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">img2idx</span><span class="p">,</span> <span class="n">ans2label</span><span class="p">,</span> <span class="n">gqa_q</span><span class="o">=</span><span class="n">gqa_q</span><span class="p">,</span> <span class="n">mode</span><span class="o">=</span><span class="n">mode</span><span class="p">)</span>
+
+        <span class="bp">self</span><span class="o">.</span><span class="n">tokenize</span><span class="p">()</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">tensorize</span><span class="p">()</span></pre></div>
+    </div>
+  </div>
+  <div class='clearall'></div>
+  <div class='section' id='section-48'>
+    <div class='docs'>
+      <div class='octowrap'>
+        <a class='octothorpe' href='#section-48'>#</a>
+      </div>
+      <p>Tokenize and Front-Pad the Questions in the Dataset</p>
+    </div>
+    <div class='code'>
+      <div class="highlight"><pre>    <span class="k">def</span> <span class="nf">tokenize</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">max_length</span><span class="o">=</span><span class="mi">40</span><span class="p">):</span></pre></div>
+    </div>
+  </div>
+  <div class='clearall'></div>
+  <div class='section' id='section-49'>
+    <div class='docs'>
+      <div class='octowrap'>
+        <a class='octothorpe' href='#section-49'>#</a>
+      </div>
+      
+    </div>
+    <div class='code'>
+      <div class="highlight"><pre>        <span class="k">for</span> <span class="n">entry</span> <span class="ow">in</span> <span class="bp">self</span><span class="o">.</span><span class="n">entries</span><span class="p">:</span>
+            <span class="n">tokens</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">dictionary</span><span class="o">.</span><span class="n">tokenize</span><span class="p">(</span><span class="n">entry</span><span class="p">[</span><span class="s1">&#39;question&#39;</span><span class="p">],</span> <span class="kc">False</span><span class="p">)</span>
+            <span class="n">tokens</span> <span class="o">=</span> <span class="n">tokens</span><span class="p">[:</span><span class="n">max_length</span><span class="p">]</span>
+            <span class="k">if</span> <span class="nb">len</span><span class="p">(</span><span class="n">tokens</span><span class="p">)</span> <span class="o">&lt;</span> <span class="n">max_length</span><span class="p">:</span></pre></div>
+    </div>
+  </div>
+  <div class='clearall'></div>
+  <div class='section' id='section-50'>
+    <div class='docs'>
+      <div class='octowrap'>
+        <a class='octothorpe' href='#section-50'>#</a>
+      </div>
+      <p>Note that we pad in front of the sentence (GRU reads left-to-right)</p>
+    </div>
+    <div class='code'>
+      <div class="highlight"><pre>                <span class="n">padding</span> <span class="o">=</span> <span class="p">[</span><span class="bp">self</span><span class="o">.</span><span class="n">dictionary</span><span class="o">.</span><span class="n">padding_idx</span><span class="p">]</span> <span class="o">*</span> <span class="p">(</span><span class="n">max_length</span> <span class="o">-</span> <span class="nb">len</span><span class="p">(</span><span class="n">tokens</span><span class="p">))</span>
+                <span class="n">tokens</span> <span class="o">=</span> <span class="n">padding</span> <span class="o">+</span> <span class="n">tokens</span>
+            <span class="k">assert</span> <span class="nb">len</span><span class="p">(</span><span class="n">tokens</span><span class="p">)</span> <span class="o">==</span> <span class="n">max_length</span><span class="p">,</span> <span class="s2">&quot;Tokenized &amp; Padded Question != Max Length!&quot;</span>
+            <span class="n">entry</span><span class="p">[</span><span class="s1">&#39;q_token&#39;</span><span class="p">]</span> <span class="o">=</span> <span class="n">tokens</span></pre></div>
+    </div>
+  </div>
+  <div class='clearall'></div>
+  <div class='section' id='section-51'>
+    <div class='docs'>
+      <div class='octowrap'>
+        <a class='octothorpe' href='#section-51'>#</a>
+      </div>
+      
+    </div>
+    <div class='code'>
+      <div class="highlight"><pre>    <span class="k">def</span> <span class="nf">tensorize</span><span class="p">(</span><span class="bp">self</span><span class="p">):</span>
+        <span class="k">for</span> <span class="n">entry</span> <span class="ow">in</span> <span class="bp">self</span><span class="o">.</span><span class="n">entries</span><span class="p">:</span>
+            <span class="n">question</span> <span class="o">=</span> <span class="n">torch</span><span class="o">.</span><span class="n">from_numpy</span><span class="p">(</span><span class="n">np</span><span class="o">.</span><span class="n">array</span><span class="p">(</span><span class="n">entry</span><span class="p">[</span><span class="s1">&#39;q_token&#39;</span><span class="p">]))</span>
+            <span class="n">entry</span><span class="p">[</span><span class="s1">&#39;q_token&#39;</span><span class="p">]</span> <span class="o">=</span> <span class="n">question</span></pre></div>
+    </div>
+  </div>
+  <div class='clearall'></div>
+  <div class='section' id='section-52'>
+    <div class='docs'>
+      <div class='octowrap'>
+        <a class='octothorpe' href='#section-52'>#</a>
+      </div>
+      
+    </div>
+    <div class='code'>
+      <div class="highlight"><pre>    <span class="k">def</span> <span class="fm">__getitem__</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">index</span><span class="p">):</span>
+        <span class="n">entry</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">entries</span><span class="p">[</span><span class="n">index</span><span class="p">]</span></pre></div>
+    </div>
+  </div>
+  <div class='clearall'></div>
+  <div class='section' id='section-53'>
+    <div class='docs'>
+      <div class='octowrap'>
+        <a class='octothorpe' href='#section-53'>#</a>
+      </div>
+      <p>Get Features</p>
+    </div>
+    <div class='code'>
+      <div class="highlight"><pre>        <span class="n">features</span> <span class="o">=</span> <span class="n">torch</span><span class="o">.</span><span class="n">from_numpy</span><span class="p">(</span><span class="n">np</span><span class="o">.</span><span class="n">array</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">features</span><span class="p">[</span><span class="n">entry</span><span class="p">[</span><span class="s1">&#39;image&#39;</span><span class="p">]]))</span>
+        <span class="n">spatials</span> <span class="o">=</span> <span class="n">torch</span><span class="o">.</span><span class="n">from_numpy</span><span class="p">(</span><span class="n">np</span><span class="o">.</span><span class="n">array</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">spatials</span><span class="p">[</span><span class="n">entry</span><span class="p">[</span><span class="s1">&#39;image&#39;</span><span class="p">]]))</span>
+        <span class="n">question</span> <span class="o">=</span> <span class="n">entry</span><span class="p">[</span><span class="s1">&#39;q_token&#39;</span><span class="p">]</span>
+        <span class="n">target</span> <span class="o">=</span> <span class="n">entry</span><span class="p">[</span><span class="s1">&#39;answer&#39;</span><span class="p">]</span>
+
+        <span class="k">return</span> <span class="n">features</span><span class="p">,</span> <span class="n">spatials</span><span class="p">,</span> <span class="n">question</span><span class="p">,</span> <span class="n">target</span></pre></div>
+    </div>
+  </div>
+  <div class='clearall'></div>
+  <div class='section' id='section-54'>
+    <div class='docs'>
+      <div class='octowrap'>
+        <a class='octothorpe' href='#section-54'>#</a>
+      </div>
+      
+    </div>
+    <div class='code'>
+      <div class="highlight"><pre>    <span class="k">def</span> <span class="fm">__len__</span><span class="p">(</span><span class="bp">self</span><span class="p">):</span>
+        <span class="k">return</span> <span class="nb">len</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">entries</span><span class="p">)</span></pre></div>
+    </div>
+  </div>
+  <div class='clearall'></div>
+  <div class='section' id='section-55'>
+    <div class='docs'>
+      <div class='octowrap'>
+        <a class='octothorpe' href='#section-55'>#</a>
+      </div>
+      <p>Load Dataset Entries</p>
+    </div>
+    <div class='code'>
+      <div class="highlight"><pre><span class="k">def</span> <span class="nf">load_dataset</span><span class="p">(</span><span class="n">img2idx</span><span class="p">,</span> <span class="n">ans2label</span><span class="p">,</span> <span class="n">gqa_q</span><span class="o">=</span><span class="s1">&#39;data/GQA-Questions&#39;</span><span class="p">,</span> <span class="n">mode</span><span class="o">=</span><span class="s1">&#39;train&#39;</span><span class="p">):</span></pre></div>
+    </div>
+  </div>
+  <div class='clearall'></div>
+  <div class='section' id='section-56'>
+    <div class='docs'>
+      <div class='octowrap'>
+        <a class='octothorpe' href='#section-56'>#</a>
+      </div>
+      
+    </div>
+    <div class='code'>
+      <div class="highlight"><pre>    <span class="n">question_path</span> <span class="o">=</span> <span class="n">os</span><span class="o">.</span><span class="n">path</span><span class="o">.</span><span class="n">join</span><span class="p">(</span><span class="n">gqa_q</span><span class="p">,</span> <span class="s1">&#39;</span><span class="si">%s</span><span class="s1">_balanced_questions.json&#39;</span> <span class="o">%</span> <span class="n">mode</span><span class="p">)</span>
+    <span class="k">with</span> <span class="nb">open</span><span class="p">(</span><span class="n">question_path</span><span class="p">,</span> <span class="s1">&#39;r&#39;</span><span class="p">)</span> <span class="k">as</span> <span class="n">f</span><span class="p">:</span>
+        <span class="n">examples</span> <span class="o">=</span> <span class="n">json</span><span class="o">.</span><span class="n">load</span><span class="p">(</span><span class="n">f</span><span class="p">)</span>
+
+    <span class="nb">print</span><span class="p">(</span><span class="s1">&#39;</span><span class="se">\t</span><span class="s1">[*] Creating GQA </span><span class="si">%s</span><span class="s1"> Entries...&#39;</span> <span class="o">%</span> <span class="n">mode</span><span class="p">)</span>
+    <span class="n">entries</span> <span class="o">=</span> <span class="p">[]</span>
+    <span class="k">for</span> <span class="n">ex_key</span> <span class="ow">in</span> <span class="nb">sorted</span><span class="p">(</span><span class="n">examples</span><span class="p">):</span>
+        <span class="n">entry</span> <span class="o">=</span> <span class="n">create_entry</span><span class="p">(</span><span class="n">examples</span><span class="p">[</span><span class="n">ex_key</span><span class="p">],</span> <span class="n">ex_key</span><span class="p">,</span> <span class="n">img2idx</span><span class="p">,</span> <span class="n">ans2label</span><span class="p">)</span>
+        <span class="n">entries</span><span class="o">.</span><span class="n">append</span><span class="p">(</span><span class="n">entry</span><span class="p">)</span>
+
+    <span class="k">return</span> <span class="n">entries</span></pre></div>
+    </div>
+  </div>
+  <div class='clearall'></div>
+  <div class='section' id='section-57'>
+    <div class='docs'>
+      <div class='octowrap'>
+        <a class='octothorpe' href='#section-57'>#</a>
+      </div>
+      
+    </div>
+    <div class='code'>
+      <div class="highlight"><pre><span class="k">def</span> <span class="nf">create_entry</span><span class="p">(</span><span class="n">example</span><span class="p">,</span> <span class="n">qid</span><span class="p">,</span> <span class="n">img2idx</span><span class="p">,</span> <span class="n">ans2label</span><span class="p">):</span>
+    <span class="n">img_id</span> <span class="o">=</span> <span class="n">example</span><span class="p">[</span><span class="s1">&#39;imageId&#39;</span><span class="p">]</span>
+    <span class="k">assert</span> <span class="n">img_id</span> <span class="ow">in</span> <span class="n">img2idx</span><span class="p">,</span> <span class="s1">&#39;Image ID not in Index!&#39;</span>
+
+    <span class="n">entry</span> <span class="o">=</span> <span class="p">{</span>
+        <span class="s1">&#39;question_id&#39;</span><span class="p">:</span> <span class="n">qid</span><span class="p">,</span>
+        <span class="s1">&#39;image_id&#39;</span><span class="p">:</span> <span class="n">img_id</span><span class="p">,</span>
+        <span class="s1">&#39;image&#39;</span><span class="p">:</span> <span class="n">img2idx</span><span class="p">[</span><span class="n">img_id</span><span class="p">],</span>
+        <span class="s1">&#39;question&#39;</span><span class="p">:</span> <span class="n">example</span><span class="p">[</span><span class="s1">&#39;question&#39;</span><span class="p">],</span>
+        <span class="s1">&#39;answer&#39;</span><span class="p">:</span> <span class="n">ans2label</span><span class="p">[</span><span class="n">example</span><span class="p">[</span><span class="s1">&#39;answer&#39;</span><span class="p">]</span><span class="o">.</span><span class="n">lower</span><span class="p">()]</span>
+    <span class="p">}</span>
+    <span class="k">return</span> <span class="n">entry</span></pre></div>
+    </div>
+  </div>
+  <div class='clearall'></div>
+  <div class='section' id='section-58'>
+    <div class='docs'>
+      <div class='octowrap'>
+        <a class='octothorpe' href='#section-58'>#</a>
+      </div>
+      <hr />
+    </div>
+    <div class='code'>
+      <div class="highlight"><pre></pre></div>
+    </div>
+  </div>
+  <div class='clearall'></div>
+  <div class='section' id='section-59'>
+    <div class='docs'>
+      <div class='octowrap'>
+        <a class='octothorpe' href='#section-59'>#</a>
+      </div>
+      <h2><span id="model-definition" href="model-definition"> Model Definition </span></h2>
+    </div>
+    <div class='code'>
+      <div class="highlight"><pre></pre></div>
+    </div>
+  </div>
+  <div class='clearall'></div>
+  <div class='section' id='section-60'>
+    <div class='docs'>
+      <div class='octowrap'>
+        <a class='octothorpe' href='#section-60'>#</a>
+      </div>
+      <p>In this section, we formally define the Bottom-Up Top-Down Model with product-based multi-modal fusion. </p>
+<p>This model is moderately different than that <a href="https://arxiv.org/abs/1707.07998">originally proposed</a> and is instead 
+inspired by the implementation by <a href="https://github.com/hengyuan-hu/bottom-up-attention-vqa">Hengyuan Hu et. al.</a> with 
+some minor tweaks around the handling of spatial features. </p>
+<p>It&rsquo;s also worth noting that this Model is built using the 
+<a href="https://github.com/PyTorchLightning/pytorch-lightning">PyTorch-Lightning</a> library &ndash; an excellent resource for quickly
+prototyping research-based models.</p>
+<hr />
+    </div>
+    <div class='code'>
+      <div class="highlight"><pre></pre></div>
+    </div>
+  </div>
+  <div class='clearall'></div>
+  <div class='section' id='section-61'>
+    <div class='docs'>
+      <div class='octowrap'>
+        <a class='octothorpe' href='#section-61'>#</a>
+      </div>
+      <h3><span id="sub-module-definitions" href="sub-module-definitions"> Sub-Module Definitions </span></h3>
+    </div>
+    <div class='code'>
+      <div class="highlight"><pre></pre></div>
+    </div>
+  </div>
+  <div class='clearall'></div>
+  <div class='section' id='section-62'>
+    <div class='docs'>
+      <div class='octowrap'>
+        <a class='octothorpe' href='#section-62'>#</a>
+      </div>
+      <p>Simple utility class defining a fully connected network (multi-layer perceptron)</p>
+    </div>
+    <div class='code'>
+      <div class="highlight"><pre><span class="k">class</span> <span class="nc">MLP</span><span class="p">(</span><span class="n">nn</span><span class="o">.</span><span class="n">Module</span><span class="p">):</span></pre></div>
+    </div>
+  </div>
+  <div class='clearall'></div>
+  <div class='section' id='section-63'>
+    <div class='docs'>
+      <div class='octowrap'>
+        <a class='octothorpe' href='#section-63'>#</a>
+      </div>
+      
+    </div>
+    <div class='code'>
+      <div class="highlight"><pre>    <span class="k">def</span> <span class="fm">__init__</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">dims</span><span class="p">,</span> <span class="n">use_weight_norm</span><span class="o">=</span><span class="kc">True</span><span class="p">):</span>
+        <span class="nb">super</span><span class="p">(</span><span class="n">MLP</span><span class="p">,</span> <span class="bp">self</span><span class="p">)</span><span class="o">.</span><span class="fm">__init__</span><span class="p">()</span>
+
+        <span class="n">layers</span> <span class="o">=</span> <span class="p">[]</span>
+        <span class="k">for</span> <span class="n">i</span> <span class="ow">in</span> <span class="nb">range</span><span class="p">(</span><span class="nb">len</span><span class="p">(</span><span class="n">dims</span><span class="p">)</span> <span class="o">-</span> <span class="mi">1</span><span class="p">):</span>
+            <span class="n">in_dim</span><span class="p">,</span> <span class="n">out_dim</span> <span class="o">=</span> <span class="n">dims</span><span class="p">[</span><span class="n">i</span><span class="p">],</span> <span class="n">dims</span><span class="p">[</span><span class="n">i</span> <span class="o">+</span> <span class="mi">1</span><span class="p">]</span>
+            <span class="k">if</span> <span class="n">use_weight_norm</span><span class="p">:</span>
+                <span class="n">layers</span><span class="o">.</span><span class="n">append</span><span class="p">(</span><span class="n">weight_norm</span><span class="p">(</span><span class="n">nn</span><span class="o">.</span><span class="n">Linear</span><span class="p">(</span><span class="n">in_dim</span><span class="p">,</span> <span class="n">out_dim</span><span class="p">),</span> <span class="n">dim</span><span class="o">=</span><span class="kc">None</span><span class="p">))</span>
+            <span class="k">else</span><span class="p">:</span>
+                <span class="n">layers</span><span class="o">.</span><span class="n">append</span><span class="p">(</span><span class="n">nn</span><span class="o">.</span><span class="n">Linear</span><span class="p">(</span><span class="n">in_dim</span><span class="p">,</span> <span class="n">out_dim</span><span class="p">))</span>
+            <span class="n">layers</span><span class="o">.</span><span class="n">append</span><span class="p">(</span><span class="n">nn</span><span class="o">.</span><span class="n">ReLU</span><span class="p">())</span>
+
+        <span class="bp">self</span><span class="o">.</span><span class="n">mlp</span> <span class="o">=</span> <span class="n">nn</span><span class="o">.</span><span class="n">Sequential</span><span class="p">(</span><span class="o">*</span><span class="n">layers</span><span class="p">)</span></pre></div>
+    </div>
+  </div>
+  <div class='clearall'></div>
+  <div class='section' id='section-64'>
+    <div class='docs'>
+      <div class='octowrap'>
+        <a class='octothorpe' href='#section-64'>#</a>
+      </div>
+      
+    </div>
+    <div class='code'>
+      <div class="highlight"><pre>    <span class="k">def</span> <span class="nf">forward</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">x</span><span class="p">):</span></pre></div>
+    </div>
+  </div>
+  <div class='clearall'></div>
+  <div class='section' id='section-65'>
+    <div class='docs'>
+      <div class='octowrap'>
+        <a class='octothorpe' href='#section-65'>#</a>
+      </div>
+      <p>output: [bsz, *, dims[0]] &ndash;&gt; [bsz, *, dims[-1]]</p>
+    </div>
+    <div class='code'>
+      <div class="highlight"><pre>        <span class="k">return</span> <span class="bp">self</span><span class="o">.</span><span class="n">mlp</span><span class="p">(</span><span class="n">x</span><span class="p">)</span></pre></div>
+    </div>
+  </div>
+  <div class='clearall'></div>
+  <div class='section' id='section-66'>
+    <div class='docs'>
+      <div class='octowrap'>
+        <a class='octothorpe' href='#section-66'>#</a>
+      </div>
+      <p>Initialize an Embedding Matrix with the appropriate dimensions &ndash;&gt; Defines padding as last token in dict</p>
+    </div>
+    <div class='code'>
+      <div class="highlight"><pre><span class="k">class</span> <span class="nc">WordEmbedding</span><span class="p">(</span><span class="n">nn</span><span class="o">.</span><span class="n">Module</span><span class="p">):</span></pre></div>
+    </div>
+  </div>
+  <div class='clearall'></div>
+  <div class='section' id='section-67'>
+    <div class='docs'>
+      <div class='octowrap'>
+        <a class='octothorpe' href='#section-67'>#</a>
+      </div>
+      
+    </div>
+    <div class='code'>
+      <div class="highlight"><pre>    <span class="k">def</span> <span class="fm">__init__</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">ntoken</span><span class="p">,</span> <span class="n">dim</span><span class="p">,</span> <span class="n">dropout</span><span class="o">=</span><span class="mf">0.0</span><span class="p">):</span>
+        <span class="nb">super</span><span class="p">(</span><span class="n">WordEmbedding</span><span class="p">,</span> <span class="bp">self</span><span class="p">)</span><span class="o">.</span><span class="fm">__init__</span><span class="p">()</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">ntoken</span><span class="p">,</span> <span class="bp">self</span><span class="o">.</span><span class="n">dim</span> <span class="o">=</span> <span class="n">ntoken</span><span class="p">,</span> <span class="n">dim</span>
+
+        <span class="bp">self</span><span class="o">.</span><span class="n">emb</span> <span class="o">=</span> <span class="n">nn</span><span class="o">.</span><span class="n">Embedding</span><span class="p">(</span><span class="n">ntoken</span> <span class="o">+</span> <span class="mi">1</span><span class="p">,</span> <span class="n">dim</span><span class="p">,</span> <span class="n">padding_idx</span><span class="o">=</span><span class="n">ntoken</span><span class="p">)</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">dropout</span> <span class="o">=</span> <span class="n">nn</span><span class="o">.</span><span class="n">Dropout</span><span class="p">(</span><span class="n">dropout</span><span class="p">)</span></pre></div>
+    </div>
+  </div>
+  <div class='clearall'></div>
+  <div class='section' id='section-68'>
+    <div class='docs'>
+      <div class='octowrap'>
+        <a class='octothorpe' href='#section-68'>#</a>
+      </div>
+      <p>Set Embedding Weights from Numpy Array</p>
+    </div>
+    <div class='code'>
+      <div class="highlight"><pre>    <span class="k">def</span> <span class="nf">load_embeddings</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">weights</span><span class="p">):</span></pre></div>
+    </div>
+  </div>
+  <div class='clearall'></div>
+  <div class='section' id='section-69'>
+    <div class='docs'>
+      <div class='octowrap'>
+        <a class='octothorpe' href='#section-69'>#</a>
+      </div>
+      
+    </div>
+    <div class='code'>
+      <div class="highlight"><pre>        <span class="k">assert</span> <span class="n">weights</span><span class="o">.</span><span class="n">shape</span> <span class="o">==</span> <span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">ntoken</span><span class="p">,</span> <span class="bp">self</span><span class="o">.</span><span class="n">dim</span><span class="p">)</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">emb</span><span class="o">.</span><span class="n">weight</span><span class="o">.</span><span class="n">data</span><span class="p">[:</span><span class="bp">self</span><span class="o">.</span><span class="n">ntoken</span><span class="p">]</span> <span class="o">=</span> <span class="n">torch</span><span class="o">.</span><span class="n">from_numpy</span><span class="p">(</span><span class="n">weights</span><span class="p">)</span></pre></div>
+    </div>
+  </div>
+  <div class='clearall'></div>
+  <div class='section' id='section-70'>
+    <div class='docs'>
+      <div class='octowrap'>
+        <a class='octothorpe' href='#section-70'>#</a>
+      </div>
+      
+    </div>
+    <div class='code'>
+      <div class="highlight"><pre>    <span class="k">def</span> <span class="nf">forward</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">x</span><span class="p">):</span></pre></div>
+    </div>
+  </div>
+  <div class='clearall'></div>
+  <div class='section' id='section-71'>
+    <div class='docs'>
+      <div class='octowrap'>
+        <a class='octothorpe' href='#section-71'>#</a>
+      </div>
+      <p>x : [bsz, seq_len]
+output: [bsz, seq_len, emb_dim]</p>
+    </div>
+    <div class='code'>
+      <div class="highlight"><pre>        <span class="k">return</span> <span class="bp">self</span><span class="o">.</span><span class="n">dropout</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">emb</span><span class="p">(</span><span class="n">x</span><span class="p">))</span></pre></div>
+    </div>
+  </div>
+  <div class='clearall'></div>
+  <div class='section' id='section-72'>
+    <div class='docs'>
+      <div class='octowrap'>
+        <a class='octothorpe' href='#section-72'>#</a>
+      </div>
+      <p>Initialize the RNN Question Encoder with the appropriate configuration</p>
+    </div>
+    <div class='code'>
+      <div class="highlight"><pre><span class="k">class</span> <span class="nc">QuestionEncoder</span><span class="p">(</span><span class="n">nn</span><span class="o">.</span><span class="n">Module</span><span class="p">):</span></pre></div>
+    </div>
+  </div>
+  <div class='clearall'></div>
+  <div class='section' id='section-73'>
+    <div class='docs'>
+      <div class='octowrap'>
+        <a class='octothorpe' href='#section-73'>#</a>
+      </div>
+      
+    </div>
+    <div class='code'>
+      <div class="highlight"><pre>    <span class="k">def</span> <span class="fm">__init__</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">in_dim</span><span class="p">,</span> <span class="n">hidden_dim</span><span class="p">,</span> <span class="n">nlayers</span><span class="o">=</span><span class="mi">1</span><span class="p">,</span> <span class="n">bidirectional</span><span class="o">=</span><span class="kc">False</span><span class="p">,</span> <span class="n">dropout</span><span class="o">=</span><span class="mf">0.0</span><span class="p">,</span> <span class="n">rnn</span><span class="o">=</span><span class="s1">&#39;GRU&#39;</span><span class="p">):</span>
+        <span class="nb">super</span><span class="p">(</span><span class="n">QuestionEncoder</span><span class="p">,</span> <span class="bp">self</span><span class="p">)</span><span class="o">.</span><span class="fm">__init__</span><span class="p">()</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">in_dim</span><span class="p">,</span> <span class="bp">self</span><span class="o">.</span><span class="n">hidden</span><span class="p">,</span> <span class="bp">self</span><span class="o">.</span><span class="n">nlayers</span><span class="p">,</span> <span class="bp">self</span><span class="o">.</span><span class="n">bidirectional</span> <span class="o">=</span> <span class="n">in_dim</span><span class="p">,</span> <span class="n">hidden_dim</span><span class="p">,</span> <span class="n">nlayers</span><span class="p">,</span> <span class="n">bidirectional</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">rnn_type</span><span class="p">,</span> <span class="bp">self</span><span class="o">.</span><span class="n">rnn_cls</span> <span class="o">=</span> <span class="n">rnn</span><span class="p">,</span> <span class="n">nn</span><span class="o">.</span><span class="n">GRU</span> <span class="k">if</span> <span class="n">rnn</span> <span class="o">==</span> <span class="s1">&#39;GRU&#39;</span> <span class="k">else</span> <span class="n">nn</span><span class="o">.</span><span class="n">LSTM</span></pre></div>
+    </div>
+  </div>
+  <div class='clearall'></div>
+  <div class='section' id='section-74'>
+    <div class='docs'>
+      <div class='octowrap'>
+        <a class='octothorpe' href='#section-74'>#</a>
+      </div>
+      <p>Initialize RNN</p>
+    </div>
+    <div class='code'>
+      <div class="highlight"><pre>        <span class="bp">self</span><span class="o">.</span><span class="n">rnn</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">rnn_cls</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">in_dim</span><span class="p">,</span> <span class="bp">self</span><span class="o">.</span><span class="n">hidden</span><span class="p">,</span> <span class="bp">self</span><span class="o">.</span><span class="n">nlayers</span><span class="p">,</span> <span class="n">bidirectional</span><span class="o">=</span><span class="bp">self</span><span class="o">.</span><span class="n">bidirectional</span><span class="p">,</span>
+                                <span class="n">dropout</span><span class="o">=</span><span class="n">dropout</span><span class="p">,</span> <span class="n">batch_first</span><span class="o">=</span><span class="kc">True</span><span class="p">)</span></pre></div>
+    </div>
+  </div>
+  <div class='clearall'></div>
+  <div class='section' id='section-75'>
+    <div class='docs'>
+      <div class='octowrap'>
+        <a class='octothorpe' href='#section-75'>#</a>
+      </div>
+      <p>x: [bsz, seq_len, emb_dim]</p>
+<p>output[0]: [bsz, seq_len, ndirections * hidden]</p>
+<p>output[1]: [bsz, nlayers * ndirections, hidden]</p>
+    </div>
+    <div class='code'>
+      <div class="highlight"><pre>    <span class="k">def</span> <span class="nf">forward</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">x</span><span class="p">):</span></pre></div>
+    </div>
+  </div>
+  <div class='clearall'></div>
+  <div class='section' id='section-76'>
+    <div class='docs'>
+      <div class='octowrap'>
+        <a class='octothorpe' href='#section-76'>#</a>
+      </div>
+      
+    </div>
+    <div class='code'>
+      <div class="highlight"><pre>        <span class="n">output</span><span class="p">,</span> <span class="n">hidden</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">rnn</span><span class="p">(</span><span class="n">x</span><span class="p">)</span>  <span class="c1"># Note that Hidden Defaults to 0</span></pre></div>
+    </div>
+  </div>
+  <div class='clearall'></div>
+  <div class='section' id='section-77'>
+    <div class='docs'>
+      <div class='octowrap'>
+        <a class='octothorpe' href='#section-77'>#</a>
+      </div>
+      <p>If not Bidirectional &ndash;&gt; Just return last output state</p>
+    </div>
+    <div class='code'>
+      <div class="highlight"><pre>        <span class="k">if</span> <span class="ow">not</span> <span class="bp">self</span><span class="o">.</span><span class="n">bidirectional</span><span class="p">:</span></pre></div>
+    </div>
+  </div>
+  <div class='clearall'></div>
+  <div class='section' id='section-78'>
+    <div class='docs'>
+      <div class='octowrap'>
+        <a class='octothorpe' href='#section-78'>#</a>
+      </div>
+      <p>output: [bsz, hidden]</p>
+    </div>
+    <div class='code'>
+      <div class="highlight"><pre>            <span class="k">return</span> <span class="n">output</span><span class="p">[:,</span> <span class="o">-</span><span class="mi">1</span><span class="p">]</span></pre></div>
+    </div>
+  </div>
+  <div class='clearall'></div>
+  <div class='section' id='section-79'>
+    <div class='docs'>
+      <div class='octowrap'>
+        <a class='octothorpe' href='#section-79'>#</a>
+      </div>
+      <p>Otherwise, concat forward state for last element and backward state for first element</p>
+    </div>
+    <div class='code'>
+      <div class="highlight"><pre>        <span class="k">else</span><span class="p">:</span></pre></div>
+    </div>
+  </div>
+  <div class='clearall'></div>
+  <div class='section' id='section-80'>
+    <div class='docs'>
+      <div class='octowrap'>
+        <a class='octothorpe' href='#section-80'>#</a>
+      </div>
+      <p>output: [bsz, 2 * hidden]</p>
+    </div>
+    <div class='code'>
+      <div class="highlight"><pre>            <span class="n">f</span><span class="p">,</span> <span class="n">b</span> <span class="o">=</span> <span class="n">output</span><span class="p">[:,</span> <span class="o">-</span><span class="mi">1</span><span class="p">,</span> <span class="p">:</span><span class="bp">self</span><span class="o">.</span><span class="n">hidden</span><span class="p">],</span> <span class="n">output</span><span class="p">[:,</span> <span class="mi">0</span><span class="p">,</span> <span class="bp">self</span><span class="o">.</span><span class="n">hidden</span><span class="p">:]</span>
+            <span class="k">return</span> <span class="n">torch</span><span class="o">.</span><span class="n">cat</span><span class="p">([</span><span class="n">f</span><span class="p">,</span> <span class="n">b</span><span class="p">],</span> <span class="n">dim</span><span class="o">=</span><span class="mi">1</span><span class="p">)</span></pre></div>
+    </div>
+  </div>
+  <div class='clearall'></div>
+  <div class='section' id='section-81'>
+    <div class='docs'>
+      <div class='octowrap'>
+        <a class='octothorpe' href='#section-81'>#</a>
+      </div>
+      <p>Initialize the Attention Mechanism with the appropriate fusion operation</p>
+    </div>
+    <div class='code'>
+      <div class="highlight"><pre><span class="k">class</span> <span class="nc">Attention</span><span class="p">(</span><span class="n">nn</span><span class="o">.</span><span class="n">Module</span><span class="p">):</span></pre></div>
+    </div>
+  </div>
+  <div class='clearall'></div>
+  <div class='section' id='section-82'>
+    <div class='docs'>
+      <div class='octowrap'>
+        <a class='octothorpe' href='#section-82'>#</a>
+      </div>
+      
+    </div>
+    <div class='code'>
+      <div class="highlight"><pre>    <span class="k">def</span> <span class="fm">__init__</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">image_dim</span><span class="p">,</span> <span class="n">question_dim</span><span class="p">,</span> <span class="n">hidden</span><span class="p">,</span> <span class="n">dropout</span><span class="o">=</span><span class="mf">0.2</span><span class="p">,</span> <span class="n">use_weight_norm</span><span class="o">=</span><span class="kc">True</span><span class="p">):</span>
+        <span class="nb">super</span><span class="p">(</span><span class="n">Attention</span><span class="p">,</span> <span class="bp">self</span><span class="p">)</span><span class="o">.</span><span class="fm">__init__</span><span class="p">()</span></pre></div>
+    </div>
+  </div>
+  <div class='clearall'></div>
+  <div class='section' id='section-83'>
+    <div class='docs'>
+      <div class='octowrap'>
+        <a class='octothorpe' href='#section-83'>#</a>
+      </div>
+      <p>Attention w/ Product Fusion</p>
+    </div>
+    <div class='code'>
+      <div class="highlight"><pre>        <span class="bp">self</span><span class="o">.</span><span class="n">image_proj</span> <span class="o">=</span> <span class="n">MLP</span><span class="p">([</span><span class="n">image_dim</span><span class="p">,</span> <span class="n">hidden</span><span class="p">],</span> <span class="n">use_weight_norm</span><span class="o">=</span><span class="n">use_weight_norm</span><span class="p">)</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">question_proj</span> <span class="o">=</span> <span class="n">MLP</span><span class="p">([</span><span class="n">question_dim</span><span class="p">,</span> <span class="n">hidden</span><span class="p">],</span> <span class="n">use_weight_norm</span><span class="o">=</span><span class="n">use_weight_norm</span><span class="p">)</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">dropout</span> <span class="o">=</span> <span class="n">nn</span><span class="o">.</span><span class="n">Dropout</span><span class="p">(</span><span class="n">dropout</span><span class="p">)</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">linear</span> <span class="o">=</span> <span class="n">weight_norm</span><span class="p">(</span><span class="n">nn</span><span class="o">.</span><span class="n">Linear</span><span class="p">(</span><span class="n">hidden</span><span class="p">,</span> <span class="mi">1</span><span class="p">),</span> <span class="n">dim</span><span class="o">=</span><span class="kc">None</span><span class="p">)</span> <span class="k">if</span> <span class="n">use_weight_norm</span> <span class="k">else</span> <span class="n">nn</span><span class="o">.</span><span class="n">Linear</span><span class="p">(</span><span class="n">hidden</span><span class="p">,</span> <span class="mi">1</span><span class="p">)</span></pre></div>
+    </div>
+  </div>
+  <div class='clearall'></div>
+  <div class='section' id='section-84'>
+    <div class='docs'>
+      <div class='octowrap'>
+        <a class='octothorpe' href='#section-84'>#</a>
+      </div>
+      
+    </div>
+    <div class='code'>
+      <div class="highlight"><pre>    <span class="k">def</span> <span class="nf">forward</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">image_features</span><span class="p">,</span> <span class="n">question_emb</span><span class="p">):</span></pre></div>
+    </div>
+  </div>
+  <div class='clearall'></div>
+  <div class='section' id='section-85'>
+    <div class='docs'>
+      <div class='octowrap'>
+        <a class='octothorpe' href='#section-85'>#</a>
+      </div>
+      <p>image_features: [bsz, k, image_dim = 2048]</p>
+    </div>
+    <div class='code'>
+      <div class="highlight"><pre></pre></div>
+    </div>
+  </div>
+  <div class='clearall'></div>
+  <div class='section' id='section-86'>
+    <div class='docs'>
+      <div class='octowrap'>
+        <a class='octothorpe' href='#section-86'>#</a>
+      </div>
+      <p>question_emb: [bsz, question_dim]</p>
+    </div>
+    <div class='code'>
+      <div class="highlight"><pre></pre></div>
+    </div>
+  </div>
+  <div class='clearall'></div>
+  <div class='section' id='section-87'>
+    <div class='docs'>
+      <div class='octowrap'>
+        <a class='octothorpe' href='#section-87'>#</a>
+      </div>
+      <p>Project both image and question embedding to hidden and repeat question_emb</p>
+    </div>
+    <div class='code'>
+      <div class="highlight"><pre>        <span class="n">num_objs</span> <span class="o">=</span> <span class="n">image_features</span><span class="o">.</span><span class="n">size</span><span class="p">(</span><span class="mi">1</span><span class="p">)</span>
+        <span class="n">image_proj</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">image_proj</span><span class="p">(</span><span class="n">image_features</span><span class="p">)</span>
+        <span class="n">question_proj</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">question_proj</span><span class="p">(</span><span class="n">question_emb</span><span class="p">)</span><span class="o">.</span><span class="n">unsqueeze</span><span class="p">(</span><span class="mi">1</span><span class="p">)</span><span class="o">.</span><span class="n">repeat</span><span class="p">(</span><span class="mi">1</span><span class="p">,</span> <span class="n">num_objs</span><span class="p">,</span> <span class="mi">1</span><span class="p">)</span></pre></div>
+    </div>
+  </div>
+  <div class='clearall'></div>
+  <div class='section' id='section-88'>
+    <div class='docs'>
+      <div class='octowrap'>
+        <a class='octothorpe' href='#section-88'>#</a>
+      </div>
+      <p><strong>Key</strong>: Fuse w/ Product</p>
+    </div>
+    <div class='code'>
+      <div class="highlight"><pre>        <span class="n">image_question</span> <span class="o">=</span> <span class="n">image_proj</span> <span class="o">*</span> <span class="n">question_proj</span></pre></div>
+    </div>
+  </div>
+  <div class='clearall'></div>
+  <div class='section' id='section-89'>
+    <div class='docs'>
+      <div class='octowrap'>
+        <a class='octothorpe' href='#section-89'>#</a>
+      </div>
+      <p>Dropout Joint Representation</p>
+    </div>
+    <div class='code'>
+      <div class="highlight"><pre>        <span class="n">joint_representation</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">dropout</span><span class="p">(</span><span class="n">image_question</span><span class="p">)</span></pre></div>
+    </div>
+  </div>
+  <div class='clearall'></div>
+  <div class='section' id='section-90'>
+    <div class='docs'>
+      <div class='octowrap'>
+        <a class='octothorpe' href='#section-90'>#</a>
+      </div>
+      <p>Compute Logits &ndash; Softmax</p>
+    </div>
+    <div class='code'>
+      <div class="highlight"><pre>        <span class="n">logits</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">linear</span><span class="p">(</span><span class="n">joint_representation</span><span class="p">)</span>
+        <span class="k">return</span> <span class="n">nn</span><span class="o">.</span><span class="n">functional</span><span class="o">.</span><span class="n">softmax</span><span class="p">(</span><span class="n">logits</span><span class="p">,</span> <span class="n">dim</span><span class="o">=</span><span class="mi">1</span><span class="p">)</span></pre></div>
+    </div>
+  </div>
+  <div class='clearall'></div>
+  <div class='section' id='section-91'>
+    <div class='docs'>
+      <div class='octowrap'>
+        <a class='octothorpe' href='#section-91'>#</a>
+      </div>
+      <hr />
+    </div>
+    <div class='code'>
+      <div class="highlight"><pre></pre></div>
+    </div>
+  </div>
+  <div class='clearall'></div>
+  <div class='section' id='section-92'>
+    <div class='docs'>
+      <div class='octowrap'>
+        <a class='octothorpe' href='#section-92'>#</a>
+      </div>
+      <h3><span id="key-model-definition" href="key-model-definition"> Key Model Definition </span></h3>
+    </div>
+    <div class='code'>
+      <div class="highlight"><pre><span class="k">class</span> <span class="nc">BUTD</span><span class="p">(</span><span class="n">pl</span><span class="o">.</span><span class="n">LightningModule</span><span class="p">):</span></pre></div>
+    </div>
+  </div>
+  <div class='clearall'></div>
+  <div class='section' id='section-93'>
+    <div class='docs'>
+      <div class='octowrap'>
+        <a class='octothorpe' href='#section-93'>#</a>
+      </div>
+      
+    </div>
+    <div class='code'>
+      <div class="highlight"><pre>    <span class="k">def</span> <span class="fm">__init__</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">hparams</span><span class="p">,</span> <span class="n">train_dataset</span><span class="p">,</span> <span class="n">val_dataset</span><span class="p">,</span> <span class="n">ans2label</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">label2ans</span><span class="o">=</span><span class="kc">None</span><span class="p">):</span>
+        <span class="nb">super</span><span class="p">(</span><span class="n">BUTD</span><span class="p">,</span> <span class="bp">self</span><span class="p">)</span><span class="o">.</span><span class="fm">__init__</span><span class="p">()</span></pre></div>
+    </div>
+  </div>
+  <div class='clearall'></div>
+  <div class='section' id='section-94'>
+    <div class='docs'>
+      <div class='octowrap'>
+        <a class='octothorpe' href='#section-94'>#</a>
+      </div>
+      <p>Save Hyper-Parameters and Dataset</p>
+    </div>
+    <div class='code'>
+      <div class="highlight"><pre>        <span class="bp">self</span><span class="o">.</span><span class="n">hparams</span> <span class="o">=</span> <span class="n">hparams</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">train_dataset</span><span class="p">,</span> <span class="bp">self</span><span class="o">.</span><span class="n">val_dataset</span> <span class="o">=</span> <span class="n">train_dataset</span><span class="p">,</span> <span class="n">val_dataset</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">ans2label</span><span class="p">,</span> <span class="bp">self</span><span class="o">.</span><span class="n">label2ans</span> <span class="o">=</span> <span class="n">ans2label</span><span class="p">,</span> <span class="n">label2ans</span></pre></div>
+    </div>
+  </div>
+  <div class='clearall'></div>
+  <div class='section' id='section-95'>
+    <div class='docs'>
+      <div class='octowrap'>
+        <a class='octothorpe' href='#section-95'>#</a>
+      </div>
+      <p>Build Model</p>
+    </div>
+    <div class='code'>
+      <div class="highlight"><pre>        <span class="bp">self</span><span class="o">.</span><span class="n">build_model</span><span class="p">()</span></pre></div>
+    </div>
+  </div>
+  <div class='clearall'></div>
+  <div class='section' id='section-96'>
+    <div class='docs'>
+      <div class='octowrap'>
+        <a class='octothorpe' href='#section-96'>#</a>
+      </div>
+      
+    </div>
+    <div class='code'>
+      <div class="highlight"><pre>    <span class="k">def</span> <span class="nf">build_model</span><span class="p">(</span><span class="bp">self</span><span class="p">):</span></pre></div>
+    </div>
+  </div>
+  <div class='clearall'></div>
+  <div class='section' id='section-97'>
+    <div class='docs'>
+      <div class='octowrap'>
+        <a class='octothorpe' href='#section-97'>#</a>
+      </div>
+      <p>Build Word Embeddings (for Questions)</p>
+    </div>
+    <div class='code'>
+      <div class="highlight"><pre>        <span class="bp">self</span><span class="o">.</span><span class="n">w_emb</span> <span class="o">=</span> <span class="n">WordEmbedding</span><span class="p">(</span><span class="n">ntoken</span><span class="o">=</span><span class="bp">self</span><span class="o">.</span><span class="n">train_dataset</span><span class="o">.</span><span class="n">dictionary</span><span class="o">.</span><span class="n">ntoken</span><span class="p">,</span> <span class="n">dim</span><span class="o">=</span><span class="bp">self</span><span class="o">.</span><span class="n">hparams</span><span class="o">.</span><span class="n">emb_dim</span><span class="p">,</span>
+                                   <span class="n">dropout</span><span class="o">=</span><span class="bp">self</span><span class="o">.</span><span class="n">hparams</span><span class="o">.</span><span class="n">emb_dropout</span><span class="p">)</span></pre></div>
+    </div>
+  </div>
+  <div class='clearall'></div>
+  <div class='section' id='section-98'>
+    <div class='docs'>
+      <div class='octowrap'>
+        <a class='octothorpe' href='#section-98'>#</a>
+      </div>
+      <p>Build Question Encoder</p>
+    </div>
+    <div class='code'>
+      <div class="highlight"><pre>        <span class="bp">self</span><span class="o">.</span><span class="n">q_enc</span> <span class="o">=</span> <span class="n">QuestionEncoder</span><span class="p">(</span><span class="n">in_dim</span><span class="o">=</span><span class="bp">self</span><span class="o">.</span><span class="n">hparams</span><span class="o">.</span><span class="n">emb_dim</span><span class="p">,</span> <span class="n">hidden_dim</span><span class="o">=</span><span class="bp">self</span><span class="o">.</span><span class="n">hparams</span><span class="o">.</span><span class="n">hidden</span><span class="p">,</span>
+                                     <span class="n">nlayers</span><span class="o">=</span><span class="bp">self</span><span class="o">.</span><span class="n">hparams</span><span class="o">.</span><span class="n">rnn_layers</span><span class="p">,</span> <span class="n">bidirectional</span><span class="o">=</span><span class="bp">self</span><span class="o">.</span><span class="n">hparams</span><span class="o">.</span><span class="n">bidirectional</span><span class="p">,</span>
+                                     <span class="n">dropout</span><span class="o">=</span><span class="bp">self</span><span class="o">.</span><span class="n">hparams</span><span class="o">.</span><span class="n">q_dropout</span><span class="p">,</span> <span class="n">rnn</span><span class="o">=</span><span class="bp">self</span><span class="o">.</span><span class="n">hparams</span><span class="o">.</span><span class="n">rnn</span><span class="p">)</span></pre></div>
+    </div>
+  </div>
+  <div class='clearall'></div>
+  <div class='section' id='section-99'>
+    <div class='docs'>
+      <div class='octowrap'>
+        <a class='octothorpe' href='#section-99'>#</a>
+      </div>
+      <p>Build Attention Mechanism</p>
+    </div>
+    <div class='code'>
+      <div class="highlight"><pre>        <span class="bp">self</span><span class="o">.</span><span class="n">att</span> <span class="o">=</span> <span class="n">Attention</span><span class="p">(</span><span class="n">image_dim</span><span class="o">=</span><span class="bp">self</span><span class="o">.</span><span class="n">train_dataset</span><span class="o">.</span><span class="n">v_dim</span> <span class="o">+</span> <span class="mi">6</span><span class="p">,</span> <span class="n">question_dim</span><span class="o">=</span><span class="bp">self</span><span class="o">.</span><span class="n">q_enc</span><span class="o">.</span><span class="n">hidden</span><span class="p">,</span>
+                             <span class="n">hidden</span><span class="o">=</span><span class="bp">self</span><span class="o">.</span><span class="n">hparams</span><span class="o">.</span><span class="n">hidden</span><span class="p">,</span> <span class="n">dropout</span><span class="o">=</span><span class="bp">self</span><span class="o">.</span><span class="n">hparams</span><span class="o">.</span><span class="n">attention_dropout</span><span class="p">,</span>
+                             <span class="n">use_weight_norm</span><span class="o">=</span><span class="bp">self</span><span class="o">.</span><span class="n">hparams</span><span class="o">.</span><span class="n">weight_norm</span><span class="p">)</span></pre></div>
+    </div>
+  </div>
+  <div class='clearall'></div>
+  <div class='section' id='section-100'>
+    <div class='docs'>
+      <div class='octowrap'>
+        <a class='octothorpe' href='#section-100'>#</a>
+      </div>
+      <p>Build Projection Networks</p>
+    </div>
+    <div class='code'>
+      <div class="highlight"><pre>        <span class="bp">self</span><span class="o">.</span><span class="n">q_project</span> <span class="o">=</span> <span class="n">MLP</span><span class="p">([</span><span class="bp">self</span><span class="o">.</span><span class="n">q_enc</span><span class="o">.</span><span class="n">hidden</span><span class="p">,</span> <span class="bp">self</span><span class="o">.</span><span class="n">hparams</span><span class="o">.</span><span class="n">hidden</span><span class="p">],</span> <span class="n">use_weight_norm</span><span class="o">=</span><span class="bp">self</span><span class="o">.</span><span class="n">hparams</span><span class="o">.</span><span class="n">weight_norm</span><span class="p">)</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">img_project</span> <span class="o">=</span> <span class="n">MLP</span><span class="p">([</span><span class="bp">self</span><span class="o">.</span><span class="n">train_dataset</span><span class="o">.</span><span class="n">v_dim</span> <span class="o">+</span> <span class="mi">6</span><span class="p">,</span> <span class="bp">self</span><span class="o">.</span><span class="n">hparams</span><span class="o">.</span><span class="n">hidden</span><span class="p">],</span>
+                               <span class="n">use_weight_norm</span><span class="o">=</span><span class="bp">self</span><span class="o">.</span><span class="n">hparams</span><span class="o">.</span><span class="n">weight_norm</span><span class="p">)</span></pre></div>
+    </div>
+  </div>
+  <div class='clearall'></div>
+  <div class='section' id='section-101'>
+    <div class='docs'>
+      <div class='octowrap'>
+        <a class='octothorpe' href='#section-101'>#</a>
+      </div>
+      <p>Build Answer Classifier</p>
+    </div>
+    <div class='code'>
+      <div class="highlight"><pre>        <span class="bp">self</span><span class="o">.</span><span class="n">ans_classifier</span> <span class="o">=</span> <span class="n">nn</span><span class="o">.</span><span class="n">Sequential</span><span class="p">(</span><span class="o">*</span><span class="p">[</span>
+            <span class="n">weight_norm</span><span class="p">(</span><span class="n">nn</span><span class="o">.</span><span class="n">Linear</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">hparams</span><span class="o">.</span><span class="n">hidden</span><span class="p">,</span> <span class="mi">2</span> <span class="o">*</span> <span class="bp">self</span><span class="o">.</span><span class="n">hparams</span><span class="o">.</span><span class="n">hidden</span><span class="p">),</span> <span class="n">dim</span><span class="o">=</span><span class="kc">None</span><span class="p">)</span>
+            <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">hparams</span><span class="o">.</span><span class="n">weight_norm</span> <span class="k">else</span> <span class="n">nn</span><span class="o">.</span><span class="n">Linear</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">hparams</span><span class="o">.</span><span class="n">hidden</span><span class="p">,</span> <span class="mi">2</span> <span class="o">*</span> <span class="bp">self</span><span class="o">.</span><span class="n">hparams</span><span class="o">.</span><span class="n">hidden</span><span class="p">),</span>
+
+            <span class="n">nn</span><span class="o">.</span><span class="n">ReLU</span><span class="p">(),</span>
+            <span class="n">nn</span><span class="o">.</span><span class="n">Dropout</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">hparams</span><span class="o">.</span><span class="n">answer_dropout</span><span class="p">),</span>
+
+            <span class="n">weight_norm</span><span class="p">(</span><span class="n">nn</span><span class="o">.</span><span class="n">Linear</span><span class="p">(</span><span class="mi">2</span> <span class="o">*</span> <span class="bp">self</span><span class="o">.</span><span class="n">hparams</span><span class="o">.</span><span class="n">hidden</span><span class="p">,</span> <span class="nb">len</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">ans2label</span><span class="p">)),</span> <span class="n">dim</span><span class="o">=</span><span class="kc">None</span><span class="p">)</span>
+            <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">hparams</span><span class="o">.</span><span class="n">weight_norm</span> <span class="k">else</span> <span class="n">nn</span><span class="o">.</span><span class="n">Linear</span><span class="p">(</span><span class="mi">2</span> <span class="o">*</span> <span class="bp">self</span><span class="o">.</span><span class="n">hparams</span><span class="o">.</span><span class="n">hidden</span><span class="p">,</span> <span class="nb">len</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">ans2label</span><span class="p">))</span>
+        <span class="p">])</span></pre></div>
+    </div>
+  </div>
+  <div class='clearall'></div>
+  <div class='section' id='section-102'>
+    <div class='docs'>
+      <div class='octowrap'>
+        <a class='octothorpe' href='#section-102'>#</a>
+      </div>
+      
+    </div>
+    <div class='code'>
+      <div class="highlight"><pre>    <span class="k">def</span> <span class="nf">forward</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">image_features</span><span class="p">,</span> <span class="n">spatial_features</span><span class="p">,</span> <span class="n">question_features</span><span class="p">,</span> <span class="n">indicator_features</span><span class="o">=</span><span class="kc">None</span><span class="p">):</span></pre></div>
+    </div>
+  </div>
+  <div class='clearall'></div>
+  <div class='section' id='section-103'>
+    <div class='docs'>
+      <div class='octowrap'>
+        <a class='octothorpe' href='#section-103'>#</a>
+      </div>
+      <p>image_features: [bsz, K, image_dim]
+question_features: [bsz, seq_len]</p>
+    </div>
+    <div class='code'>
+      <div class="highlight"><pre></pre></div>
+    </div>
+  </div>
+  <div class='clearall'></div>
+  <div class='section' id='section-104'>
+    <div class='docs'>
+      <div class='octowrap'>
+        <a class='octothorpe' href='#section-104'>#</a>
+      </div>
+      <p>Embed and Encode Question &ndash; [bsz, q_hidden]</p>
+    </div>
+    <div class='code'>
+      <div class="highlight"><pre>        <span class="n">w_emb</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">w_emb</span><span class="p">(</span><span class="n">question_features</span><span class="p">)</span>
+        <span class="n">q_enc</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">q_enc</span><span class="p">(</span><span class="n">w_emb</span><span class="p">)</span></pre></div>
+    </div>
+  </div>
+  <div class='clearall'></div>
+  <div class='section' id='section-105'>
+    <div class='docs'>
+      <div class='octowrap'>
+        <a class='octothorpe' href='#section-105'>#</a>
+      </div>
+      <p>Create new Image Features</p>
+    </div>
+    <div class='code'>
+      <div class="highlight"><pre></pre></div>
+    </div>
+  </div>
+  <div class='clearall'></div>
+  <div class='section' id='section-106'>
+    <div class='docs'>
+      <div class='octowrap'>
+        <a class='octothorpe' href='#section-106'>#</a>
+      </div>
+      <p><strong>Key</strong>: Concatenate Spatial Features!</p>
+    </div>
+    <div class='code'>
+      <div class="highlight"><pre>        <span class="k">if</span> <span class="n">indicator_features</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span><span class="p">:</span>
+            <span class="n">image_features</span> <span class="o">=</span> <span class="n">torch</span><span class="o">.</span><span class="n">cat</span><span class="p">([</span><span class="n">image_features</span><span class="p">,</span> <span class="n">spatial_features</span><span class="p">,</span> <span class="n">indicator_features</span><span class="p">],</span> <span class="n">dim</span><span class="o">=</span><span class="mi">2</span><span class="p">)</span>
+        <span class="k">else</span><span class="p">:</span>
+            <span class="n">image_features</span> <span class="o">=</span> <span class="n">torch</span><span class="o">.</span><span class="n">cat</span><span class="p">([</span><span class="n">image_features</span><span class="p">,</span> <span class="n">spatial_features</span><span class="p">],</span> <span class="n">dim</span><span class="o">=</span><span class="mi">2</span><span class="p">)</span></pre></div>
+    </div>
+  </div>
+  <div class='clearall'></div>
+  <div class='section' id='section-107'>
+    <div class='docs'>
+      <div class='octowrap'>
+        <a class='octothorpe' href='#section-107'>#</a>
+      </div>
+      <p>Attend over Image Features and Create Image Encoding</p>
+    </div>
+    <div class='code'>
+      <div class="highlight"><pre></pre></div>
+    </div>
+  </div>
+  <div class='clearall'></div>
+  <div class='section' id='section-108'>
+    <div class='docs'>
+      <div class='octowrap'>
+        <a class='octothorpe' href='#section-108'>#</a>
+      </div>
+      <p>img_enc: [bsz, img_hidden]</p>
+    </div>
+    <div class='code'>
+      <div class="highlight"><pre>        <span class="n">att</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">att</span><span class="p">(</span><span class="n">image_features</span><span class="p">,</span> <span class="n">q_enc</span><span class="p">)</span>
+        <span class="n">img_enc</span> <span class="o">=</span> <span class="p">(</span><span class="n">image_features</span> <span class="o">*</span> <span class="n">att</span><span class="p">)</span><span class="o">.</span><span class="n">sum</span><span class="p">(</span><span class="n">dim</span><span class="o">=</span><span class="mi">1</span><span class="p">)</span></pre></div>
+    </div>
+  </div>
+  <div class='clearall'></div>
+  <div class='section' id='section-109'>
+    <div class='docs'>
+      <div class='octowrap'>
+        <a class='octothorpe' href='#section-109'>#</a>
+      </div>
+      <p>Project Image and Question Features &ndash;&gt; [bsz, hidden]</p>
+    </div>
+    <div class='code'>
+      <div class="highlight"><pre>        <span class="n">q_repr</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">q_project</span><span class="p">(</span><span class="n">q_enc</span><span class="p">)</span>
+        <span class="n">img_repr</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">img_project</span><span class="p">(</span><span class="n">img_enc</span><span class="p">)</span></pre></div>
+    </div>
+  </div>
+  <div class='clearall'></div>
+  <div class='section' id='section-110'>
+    <div class='docs'>
+      <div class='octowrap'>
+        <a class='octothorpe' href='#section-110'>#</a>
+      </div>
+      <p>Merge</p>
+    </div>
+    <div class='code'>
+      <div class="highlight"><pre>        <span class="n">joint_repr</span> <span class="o">=</span> <span class="n">q_repr</span> <span class="o">*</span> <span class="n">img_repr</span></pre></div>
+    </div>
+  </div>
+  <div class='clearall'></div>
+  <div class='section' id='section-111'>
+    <div class='docs'>
+      <div class='octowrap'>
+        <a class='octothorpe' href='#section-111'>#</a>
+      </div>
+      <p>Compute and Return Logits</p>
+    </div>
+    <div class='code'>
+      <div class="highlight"><pre>        <span class="k">return</span> <span class="bp">self</span><span class="o">.</span><span class="n">ans_classifier</span><span class="p">(</span><span class="n">joint_repr</span><span class="p">)</span></pre></div>
+    </div>
+  </div>
+  <div class='clearall'></div>
+  <div class='section' id='section-112'>
+    <div class='docs'>
+      <div class='octowrap'>
+        <a class='octothorpe' href='#section-112'>#</a>
+      </div>
+      
+    </div>
+    <div class='code'>
+      <div class="highlight"><pre>    <span class="k">def</span> <span class="nf">configure_optimizers</span><span class="p">(</span><span class="bp">self</span><span class="p">):</span>
+        <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">hparams</span><span class="o">.</span><span class="n">opt</span> <span class="o">==</span> <span class="s1">&#39;adamax&#39;</span><span class="p">:</span>
+            <span class="k">return</span> <span class="n">torch</span><span class="o">.</span><span class="n">optim</span><span class="o">.</span><span class="n">Adamax</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">parameters</span><span class="p">())</span></pre></div>
+    </div>
+  </div>
+  <div class='clearall'></div>
+  <div class='section' id='section-113'>
+    <div class='docs'>
+      <div class='octowrap'>
+        <a class='octothorpe' href='#section-113'>#</a>
+      </div>
+      
+    </div>
+    <div class='code'>
+      <div class="highlight"><pre>    <span class="k">def</span> <span class="nf">train_dataloader</span><span class="p">(</span><span class="bp">self</span><span class="p">):</span>
+        <span class="k">return</span> <span class="n">DataLoader</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">train_dataset</span><span class="p">,</span> <span class="n">batch_size</span><span class="o">=</span><span class="bp">self</span><span class="o">.</span><span class="n">hparams</span><span class="o">.</span><span class="n">bsz</span><span class="p">,</span> <span class="n">shuffle</span><span class="o">=</span><span class="kc">True</span><span class="p">)</span></pre></div>
+    </div>
+  </div>
+  <div class='clearall'></div>
+  <div class='section' id='section-114'>
+    <div class='docs'>
+      <div class='octowrap'>
+        <a class='octothorpe' href='#section-114'>#</a>
+      </div>
+      
+    </div>
+    <div class='code'>
+      <div class="highlight"><pre>    <span class="k">def</span> <span class="nf">val_dataloader</span><span class="p">(</span><span class="bp">self</span><span class="p">):</span>
+        <span class="k">return</span> <span class="n">DataLoader</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">val_dataset</span><span class="p">,</span> <span class="n">batch_size</span><span class="o">=</span><span class="bp">self</span><span class="o">.</span><span class="n">hparams</span><span class="o">.</span><span class="n">bsz</span><span class="p">)</span></pre></div>
+    </div>
+  </div>
+  <div class='clearall'></div>
+  <div class='section' id='section-115'>
+    <div class='docs'>
+      <div class='octowrap'>
+        <a class='octothorpe' href='#section-115'>#</a>
+      </div>
+      
+    </div>
+    <div class='code'>
+      <div class="highlight"><pre>    <span class="k">def</span> <span class="nf">training_step</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">train_batch</span><span class="p">,</span> <span class="n">batch_idx</span><span class="p">):</span>
+        <span class="n">img</span><span class="p">,</span> <span class="n">spatials</span><span class="p">,</span> <span class="n">question</span><span class="p">,</span> <span class="n">answer</span> <span class="o">=</span> <span class="n">train_batch</span></pre></div>
+    </div>
+  </div>
+  <div class='clearall'></div>
+  <div class='section' id='section-116'>
+    <div class='docs'>
+      <div class='octowrap'>
+        <a class='octothorpe' href='#section-116'>#</a>
+      </div>
+      <p>Run Forward Pass</p>
+    </div>
+    <div class='code'>
+      <div class="highlight"><pre>        <span class="n">logits</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">forward</span><span class="p">(</span><span class="n">img</span><span class="p">,</span> <span class="n">spatials</span><span class="p">,</span> <span class="n">question</span><span class="p">)</span></pre></div>
+    </div>
+  </div>
+  <div class='clearall'></div>
+  <div class='section' id='section-117'>
+    <div class='docs'>
+      <div class='octowrap'>
+        <a class='octothorpe' href='#section-117'>#</a>
+      </div>
+      <p>Compute Loss (Cross-Entropy)</p>
+    </div>
+    <div class='code'>
+      <div class="highlight"><pre>        <span class="n">loss</span> <span class="o">=</span> <span class="n">nn</span><span class="o">.</span><span class="n">functional</span><span class="o">.</span><span class="n">cross_entropy</span><span class="p">(</span><span class="n">logits</span><span class="p">,</span> <span class="n">answer</span><span class="p">)</span></pre></div>
+    </div>
+  </div>
+  <div class='clearall'></div>
+  <div class='section' id='section-118'>
+    <div class='docs'>
+      <div class='octowrap'>
+        <a class='octothorpe' href='#section-118'>#</a>
+      </div>
+      <p>Compute Answer Accuracy</p>
+    </div>
+    <div class='code'>
+      <div class="highlight"><pre>        <span class="n">accuracy</span> <span class="o">=</span> <span class="n">torch</span><span class="o">.</span><span class="n">mean</span><span class="p">((</span><span class="n">logits</span><span class="o">.</span><span class="n">argmax</span><span class="p">(</span><span class="n">dim</span><span class="o">=</span><span class="mi">1</span><span class="p">)</span> <span class="o">==</span> <span class="n">answer</span><span class="p">)</span><span class="o">.</span><span class="n">float</span><span class="p">())</span></pre></div>
+    </div>
+  </div>
+  <div class='clearall'></div>
+  <div class='section' id='section-119'>
+    <div class='docs'>
+      <div class='octowrap'>
+        <a class='octothorpe' href='#section-119'>#</a>
+      </div>
+      <p>Set up Data to be Logged</p>
+    </div>
+    <div class='code'>
+      <div class="highlight"><pre>        <span class="n">log</span> <span class="o">=</span> <span class="p">{</span><span class="s1">&#39;train_loss&#39;</span><span class="p">:</span> <span class="n">loss</span><span class="p">,</span> <span class="s1">&#39;train_acc&#39;</span><span class="p">:</span> <span class="n">accuracy</span><span class="p">}</span>
+
+        <span class="k">return</span> <span class="p">{</span><span class="s1">&#39;loss&#39;</span><span class="p">:</span> <span class="n">loss</span><span class="p">,</span> <span class="s1">&#39;train_loss&#39;</span><span class="p">:</span> <span class="n">loss</span><span class="p">,</span> <span class="s1">&#39;train_acc&#39;</span><span class="p">:</span> <span class="n">accuracy</span><span class="p">,</span> <span class="s1">&#39;progress_bar&#39;</span><span class="p">:</span> <span class="n">log</span><span class="p">,</span> <span class="s1">&#39;log&#39;</span><span class="p">:</span> <span class="n">log</span><span class="p">}</span></pre></div>
+    </div>
+  </div>
+  <div class='clearall'></div>
+  <div class='section' id='section-120'>
+    <div class='docs'>
+      <div class='octowrap'>
+        <a class='octothorpe' href='#section-120'>#</a>
+      </div>
+      
+    </div>
+    <div class='code'>
+      <div class="highlight"><pre>    <span class="k">def</span> <span class="nf">training_epoch_end</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">outputs</span><span class="p">):</span></pre></div>
+    </div>
+  </div>
+  <div class='clearall'></div>
+  <div class='section' id='section-121'>
+    <div class='docs'>
+      <div class='octowrap'>
+        <a class='octothorpe' href='#section-121'>#</a>
+      </div>
+      <p>Outputs &ndash;&gt; List of Individual Step Outputs</p>
+    </div>
+    <div class='code'>
+      <div class="highlight"><pre>        <span class="n">avg_loss</span> <span class="o">=</span> <span class="n">torch</span><span class="o">.</span><span class="n">stack</span><span class="p">([</span><span class="n">x</span><span class="p">[</span><span class="s1">&#39;callback_metrics&#39;</span><span class="p">][</span><span class="s1">&#39;train_loss&#39;</span><span class="p">]</span> <span class="k">for</span> <span class="n">x</span> <span class="ow">in</span> <span class="n">outputs</span><span class="p">])</span><span class="o">.</span><span class="n">mean</span><span class="p">()</span>
+        <span class="n">avg_acc</span> <span class="o">=</span> <span class="n">torch</span><span class="o">.</span><span class="n">stack</span><span class="p">([</span><span class="n">x</span><span class="p">[</span><span class="s1">&#39;callback_metrics&#39;</span><span class="p">][</span><span class="s1">&#39;train_acc&#39;</span><span class="p">]</span> <span class="k">for</span> <span class="n">x</span> <span class="ow">in</span> <span class="n">outputs</span><span class="p">])</span><span class="o">.</span><span class="n">mean</span><span class="p">()</span>
+
+        <span class="n">log</span> <span class="o">=</span> <span class="p">{</span><span class="s1">&#39;train_epoch_loss&#39;</span><span class="p">:</span> <span class="n">avg_loss</span><span class="p">,</span> <span class="s1">&#39;train_epoch_acc&#39;</span><span class="p">:</span> <span class="n">avg_acc</span><span class="p">}</span>
+
+        <span class="k">return</span> <span class="p">{</span><span class="s1">&#39;progress_bar&#39;</span><span class="p">:</span> <span class="n">log</span><span class="p">,</span> <span class="s1">&#39;log&#39;</span><span class="p">:</span> <span class="n">log</span><span class="p">}</span></pre></div>
+    </div>
+  </div>
+  <div class='clearall'></div>
+  <div class='section' id='section-122'>
+    <div class='docs'>
+      <div class='octowrap'>
+        <a class='octothorpe' href='#section-122'>#</a>
+      </div>
+      
+    </div>
+    <div class='code'>
+      <div class="highlight"><pre>    <span class="k">def</span> <span class="nf">validation_step</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">val_batch</span><span class="p">,</span> <span class="n">batch_idx</span><span class="p">):</span>
+        <span class="n">img</span><span class="p">,</span> <span class="n">spatials</span><span class="p">,</span> <span class="n">question</span><span class="p">,</span> <span class="n">answer</span> <span class="o">=</span> <span class="n">val_batch</span></pre></div>
+    </div>
+  </div>
+  <div class='clearall'></div>
+  <div class='section' id='section-123'>
+    <div class='docs'>
+      <div class='octowrap'>
+        <a class='octothorpe' href='#section-123'>#</a>
+      </div>
+      <p>Run Forward Pass</p>
+    </div>
+    <div class='code'>
+      <div class="highlight"><pre>        <span class="n">logits</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">forward</span><span class="p">(</span><span class="n">img</span><span class="p">,</span> <span class="n">spatials</span><span class="p">,</span> <span class="n">question</span><span class="p">)</span></pre></div>
+    </div>
+  </div>
+  <div class='clearall'></div>
+  <div class='section' id='section-124'>
+    <div class='docs'>
+      <div class='octowrap'>
+        <a class='octothorpe' href='#section-124'>#</a>
+      </div>
+      <p>Compute Loss (Cross-Entropy)</p>
+    </div>
+    <div class='code'>
+      <div class="highlight"><pre>        <span class="n">loss</span> <span class="o">=</span> <span class="n">nn</span><span class="o">.</span><span class="n">functional</span><span class="o">.</span><span class="n">cross_entropy</span><span class="p">(</span><span class="n">logits</span><span class="p">,</span> <span class="n">answer</span><span class="p">)</span></pre></div>
+    </div>
+  </div>
+  <div class='clearall'></div>
+  <div class='section' id='section-125'>
+    <div class='docs'>
+      <div class='octowrap'>
+        <a class='octothorpe' href='#section-125'>#</a>
+      </div>
+      <p>Compute Answer Accuracy</p>
+    </div>
+    <div class='code'>
+      <div class="highlight"><pre>        <span class="n">accuracy</span> <span class="o">=</span> <span class="n">torch</span><span class="o">.</span><span class="n">mean</span><span class="p">((</span><span class="n">logits</span><span class="o">.</span><span class="n">argmax</span><span class="p">(</span><span class="n">dim</span><span class="o">=</span><span class="mi">1</span><span class="p">)</span> <span class="o">==</span> <span class="n">answer</span><span class="p">)</span><span class="o">.</span><span class="n">float</span><span class="p">())</span>
+
+        <span class="k">return</span> <span class="p">{</span><span class="s1">&#39;val_loss&#39;</span><span class="p">:</span> <span class="n">loss</span><span class="p">,</span> <span class="s1">&#39;val_acc&#39;</span><span class="p">:</span> <span class="n">accuracy</span><span class="p">}</span></pre></div>
+    </div>
+  </div>
+  <div class='clearall'></div>
+  <div class='section' id='section-126'>
+    <div class='docs'>
+      <div class='octowrap'>
+        <a class='octothorpe' href='#section-126'>#</a>
+      </div>
+      
+    </div>
+    <div class='code'>
+      <div class="highlight"><pre>    <span class="k">def</span> <span class="nf">validation_epoch_end</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">outputs</span><span class="p">):</span></pre></div>
+    </div>
+  </div>
+  <div class='clearall'></div>
+  <div class='section' id='section-127'>
+    <div class='docs'>
+      <div class='octowrap'>
+        <a class='octothorpe' href='#section-127'>#</a>
+      </div>
+      <p>Outputs &ndash;&gt; List of Individual Step Outputs</p>
+    </div>
+    <div class='code'>
+      <div class="highlight"><pre>        <span class="n">avg_loss</span> <span class="o">=</span> <span class="n">torch</span><span class="o">.</span><span class="n">stack</span><span class="p">([</span><span class="n">x</span><span class="p">[</span><span class="s1">&#39;val_loss&#39;</span><span class="p">]</span> <span class="k">for</span> <span class="n">x</span> <span class="ow">in</span> <span class="n">outputs</span><span class="p">])</span><span class="o">.</span><span class="n">mean</span><span class="p">()</span>
+        <span class="n">avg_acc</span> <span class="o">=</span> <span class="n">torch</span><span class="o">.</span><span class="n">stack</span><span class="p">([</span><span class="n">x</span><span class="p">[</span><span class="s1">&#39;val_acc&#39;</span><span class="p">]</span> <span class="k">for</span> <span class="n">x</span> <span class="ow">in</span> <span class="n">outputs</span><span class="p">])</span><span class="o">.</span><span class="n">mean</span><span class="p">()</span>
+
+        <span class="n">log</span> <span class="o">=</span> <span class="p">{</span><span class="s1">&#39;val_loss&#39;</span><span class="p">:</span> <span class="n">avg_loss</span><span class="p">,</span> <span class="s1">&#39;val_acc&#39;</span><span class="p">:</span> <span class="n">avg_acc</span><span class="p">}</span>
+        <span class="k">return</span> <span class="p">{</span><span class="s1">&#39;progress_bar&#39;</span><span class="p">:</span> <span class="n">log</span><span class="p">,</span> <span class="s1">&#39;log&#39;</span><span class="p">:</span> <span class="n">log</span><span class="p">}</span></pre></div>
+    </div>
+  </div>
+  <div class='clearall'></div>
+  <div class='section' id='section-128'>
+    <div class='docs'>
+      <div class='octowrap'>
+        <a class='octothorpe' href='#section-128'>#</a>
+      </div>
+      <hr />
+    </div>
+    <div class='code'>
+      <div class="highlight"><pre></pre></div>
+    </div>
+  </div>
+  <div class='clearall'></div>
+  <div class='section' id='section-129'>
+    <div class='docs'>
+      <div class='octowrap'>
+        <a class='octothorpe' href='#section-129'>#</a>
+      </div>
+      <h2><span id="logging" href="logging"> Logging </span></h2>
+    </div>
+    <div class='code'>
+      <div class="highlight"><pre></pre></div>
+    </div>
+  </div>
+  <div class='clearall'></div>
+  <div class='section' id='section-130'>
+    <div class='docs'>
+      <div class='octowrap'>
+        <a class='octothorpe' href='#section-130'>#</a>
+      </div>
+      <p><em>We tap into PyTorch-Lightning&rsquo;s extensive Logging Capabilities and define our own simple logger to log metrics like
+training loss, training accuracy, validation loss, and validation accuracy to straightforward JSON files.</em></p>
+<hr />
+    </div>
+    <div class='code'>
+      <div class="highlight"><pre></pre></div>
+    </div>
+  </div>
+  <div class='clearall'></div>
+  <div class='section' id='section-131'>
+    <div class='docs'>
+      <div class='octowrap'>
+        <a class='octothorpe' href='#section-131'>#</a>
+      </div>
+      
+    </div>
+    <div class='code'>
+      <div class="highlight"><pre><span class="k">class</span> <span class="nc">MetricLogger</span><span class="p">(</span><span class="n">LightningLoggerBase</span><span class="p">):</span></pre></div>
+    </div>
+  </div>
+  <div class='clearall'></div>
+  <div class='section' id='section-132'>
+    <div class='docs'>
+      <div class='octowrap'>
+        <a class='octothorpe' href='#section-132'>#</a>
+      </div>
+      
+    </div>
+    <div class='code'>
+      <div class="highlight"><pre>    <span class="k">def</span> <span class="fm">__init__</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">name</span><span class="p">,</span> <span class="n">save_dir</span><span class="p">):</span>
+        <span class="nb">super</span><span class="p">(</span><span class="n">MetricLogger</span><span class="p">,</span> <span class="bp">self</span><span class="p">)</span><span class="o">.</span><span class="fm">__init__</span><span class="p">()</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_name</span><span class="p">,</span> <span class="bp">self</span><span class="o">.</span><span class="n">_save_dir</span> <span class="o">=</span> <span class="n">name</span><span class="p">,</span> <span class="n">os</span><span class="o">.</span><span class="n">path</span><span class="o">.</span><span class="n">join</span><span class="p">(</span><span class="n">save_dir</span><span class="p">,</span> <span class="s1">&#39;metrics&#39;</span><span class="p">)</span></pre></div>
+    </div>
+  </div>
+  <div class='clearall'></div>
+  <div class='section' id='section-133'>
+    <div class='docs'>
+      <div class='octowrap'>
+        <a class='octothorpe' href='#section-133'>#</a>
+      </div>
+      <p>Create Massive Dictionary to JSONify</p>
+    </div>
+    <div class='code'>
+      <div class="highlight"><pre>        <span class="bp">self</span><span class="o">.</span><span class="n">events</span> <span class="o">=</span> <span class="p">{}</span></pre></div>
+    </div>
+  </div>
+  <div class='clearall'></div>
+  <div class='section' id='section-134'>
+    <div class='docs'>
+      <div class='octowrap'>
+        <a class='octothorpe' href='#section-134'>#</a>
+      </div>
+      
+    </div>
+    <div class='code'>
+      <div class="highlight"><pre>    <span class="nd">@property</span>
+    <span class="k">def</span> <span class="nf">name</span><span class="p">(</span><span class="bp">self</span><span class="p">):</span>
+        <span class="k">return</span> <span class="bp">self</span><span class="o">.</span><span class="n">_name</span>
+
+    <span class="nd">@property</span>
+    <span class="k">def</span> <span class="nf">experiment</span><span class="p">(</span><span class="bp">self</span><span class="p">):</span>
+        <span class="k">return</span> <span class="kc">None</span>
+
+    <span class="nd">@property</span>
+    <span class="k">def</span> <span class="nf">version</span><span class="p">(</span><span class="bp">self</span><span class="p">):</span>
+        <span class="k">return</span> <span class="mf">1.0</span>
+
+    <span class="nd">@rank_zero_only</span>
+    <span class="k">def</span> <span class="nf">log_hyperparams</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">params</span><span class="p">):</span></pre></div>
+    </div>
+  </div>
+  <div class='clearall'></div>
+  <div class='section' id='section-135'>
+    <div class='docs'>
+      <div class='octowrap'>
+        <a class='octothorpe' href='#section-135'>#</a>
+      </div>
+      <p>Params is an argparse.Namespace</p>
+    </div>
+    <div class='code'>
+      <div class="highlight"><pre>        <span class="bp">self</span><span class="o">.</span><span class="n">events</span><span class="p">[</span><span class="s1">&#39;hyperparams&#39;</span><span class="p">]</span> <span class="o">=</span> <span class="nb">vars</span><span class="p">(</span><span class="n">params</span><span class="p">)</span></pre></div>
+    </div>
+  </div>
+  <div class='clearall'></div>
+  <div class='section' id='section-136'>
+    <div class='docs'>
+      <div class='octowrap'>
+        <a class='octothorpe' href='#section-136'>#</a>
+      </div>
+      
+    </div>
+    <div class='code'>
+      <div class="highlight"><pre>    <span class="nd">@rank_zero_only</span>
+    <span class="k">def</span> <span class="nf">log_metrics</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">metrics</span><span class="p">,</span> <span class="n">step</span><span class="p">):</span></pre></div>
+    </div>
+  </div>
+  <div class='clearall'></div>
+  <div class='section' id='section-137'>
+    <div class='docs'>
+      <div class='octowrap'>
+        <a class='octothorpe' href='#section-137'>#</a>
+      </div>
+      <p>Metrics is a dictionary of metric names and values</p>
+    </div>
+    <div class='code'>
+      <div class="highlight"><pre>        <span class="k">for</span> <span class="n">metric</span> <span class="ow">in</span> <span class="n">metrics</span><span class="p">:</span>
+            <span class="k">if</span> <span class="n">metric</span> <span class="ow">in</span> <span class="bp">self</span><span class="o">.</span><span class="n">events</span><span class="p">:</span>
+                <span class="bp">self</span><span class="o">.</span><span class="n">events</span><span class="p">[</span><span class="n">metric</span><span class="p">]</span><span class="o">.</span><span class="n">append</span><span class="p">(</span><span class="n">metrics</span><span class="p">[</span><span class="n">metric</span><span class="p">])</span>
+                <span class="bp">self</span><span class="o">.</span><span class="n">events</span><span class="p">[</span><span class="s2">&quot;</span><span class="si">%s</span><span class="s2">_step&quot;</span> <span class="o">%</span> <span class="n">metric</span><span class="p">]</span><span class="o">.</span><span class="n">append</span><span class="p">(</span><span class="n">step</span><span class="p">)</span>
+            <span class="k">else</span><span class="p">:</span>
+                <span class="bp">self</span><span class="o">.</span><span class="n">events</span><span class="p">[</span><span class="n">metric</span><span class="p">]</span> <span class="o">=</span> <span class="p">[</span><span class="n">metrics</span><span class="p">[</span><span class="n">metric</span><span class="p">]]</span>
+                <span class="bp">self</span><span class="o">.</span><span class="n">events</span><span class="p">[</span><span class="s2">&quot;</span><span class="si">%s</span><span class="s2">_step&quot;</span> <span class="o">%</span> <span class="n">metric</span><span class="p">]</span> <span class="o">=</span> <span class="p">[</span><span class="n">step</span><span class="p">]</span></pre></div>
+    </div>
+  </div>
+  <div class='clearall'></div>
+  <div class='section' id='section-138'>
+    <div class='docs'>
+      <div class='octowrap'>
+        <a class='octothorpe' href='#section-138'>#</a>
+      </div>
+      
+    </div>
+    <div class='code'>
+      <div class="highlight"><pre>    <span class="nd">@rank_zero_only</span>
+    <span class="k">def</span> <span class="nf">finalize</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">status</span><span class="p">):</span></pre></div>
+    </div>
+  </div>
+  <div class='clearall'></div>
+  <div class='section' id='section-139'>
+    <div class='docs'>
+      <div class='octowrap'>
+        <a class='octothorpe' href='#section-139'>#</a>
+      </div>
+      <p>Optional. Any code that needs to be run after training</p>
+    </div>
+    <div class='code'>
+      <div class="highlight"><pre>        <span class="bp">self</span><span class="o">.</span><span class="n">events</span><span class="p">[</span><span class="s1">&#39;status&#39;</span><span class="p">]</span> <span class="o">=</span> <span class="n">status</span>
+
+        <span class="k">if</span> <span class="ow">not</span> <span class="n">os</span><span class="o">.</span><span class="n">path</span><span class="o">.</span><span class="n">exists</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">_save_dir</span><span class="p">):</span>
+            <span class="n">os</span><span class="o">.</span><span class="n">makedirs</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">_save_dir</span><span class="p">)</span>
+
+        <span class="k">with</span> <span class="nb">open</span><span class="p">(</span><span class="n">os</span><span class="o">.</span><span class="n">path</span><span class="o">.</span><span class="n">join</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">_save_dir</span><span class="p">,</span> <span class="s1">&#39;</span><span class="si">%s</span><span class="s1">-metrics.json&#39;</span> <span class="o">%</span> <span class="bp">self</span><span class="o">.</span><span class="n">_name</span><span class="p">),</span> <span class="s1">&#39;w&#39;</span><span class="p">)</span> <span class="k">as</span> <span class="n">f</span><span class="p">:</span>
+            <span class="n">json</span><span class="o">.</span><span class="n">dump</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">events</span><span class="p">,</span> <span class="n">f</span><span class="p">,</span> <span class="n">indent</span><span class="o">=</span><span class="mi">4</span><span class="p">)</span></pre></div>
+    </div>
+  </div>
+  <div class='clearall'></div>
+  <div class='section' id='section-140'>
+    <div class='docs'>
+      <div class='octowrap'>
+        <a class='octothorpe' href='#section-140'>#</a>
+      </div>
+      <hr />
+    </div>
+    <div class='code'>
+      <div class="highlight"><pre></pre></div>
+    </div>
+  </div>
+  <div class='clearall'></div>
+  <div class='section' id='section-141'>
+    <div class='docs'>
+      <div class='octowrap'>
+        <a class='octothorpe' href='#section-141'>#</a>
+      </div>
+      <h2><span id="bringing-the-pieces-together" href="bringing-the-pieces-together"> Bringing the Pieces Together </span></h2>
+    </div>
+    <div class='code'>
+      <div class="highlight"><pre></pre></div>
+    </div>
+  </div>
+  <div class='clearall'></div>
+  <div class='section' id='section-142'>
+    <div class='docs'>
+      <div class='octowrap'>
+        <a class='octothorpe' href='#section-142'>#</a>
+      </div>
+      <p>Here, we bring all the pieces together, calling each of the 4 preprocessing steps, assembling the training and
+development datasets, and initializing and training the BUTD model. </p>
+<hr />
+    </div>
+    <div class='code'>
+      <div class="highlight"><pre></pre></div>
+    </div>
+  </div>
+  <div class='clearall'></div>
+  <div class='section' id='section-143'>
+    <div class='docs'>
+      <div class='octowrap'>
+        <a class='octothorpe' href='#section-143'>#</a>
+      </div>
+      <p>Preprocess Question Data &ndash; Return Dictionary and GloVe-initialized Embeddings</p>
+    </div>
+    <div class='code'>
+      <div class="highlight"><pre><span class="nb">print</span><span class="p">(</span><span class="s1">&#39;</span><span class="se">\n</span><span class="s1">[*] Pre-processing GQA Questions...&#39;</span><span class="p">)</span>
+<span class="n">dictionary</span><span class="p">,</span> <span class="n">emb</span> <span class="o">=</span> <span class="n">gqa_create_dictionary_glove</span><span class="p">(</span><span class="n">gqa_q</span><span class="o">=</span><span class="n">args</span><span class="o">.</span><span class="n">gqa_questions</span><span class="p">,</span> <span class="n">glove</span><span class="o">=</span><span class="n">args</span><span class="o">.</span><span class="n">glove</span><span class="p">,</span> <span class="n">cache</span><span class="o">=</span><span class="n">args</span><span class="o">.</span><span class="n">gqa_cache</span><span class="p">)</span></pre></div>
+    </div>
+  </div>
+  <div class='clearall'></div>
+  <div class='section' id='section-144'>
+    <div class='docs'>
+      <div class='octowrap'>
+        <a class='octothorpe' href='#section-144'>#</a>
+      </div>
+      <p>Preprocess Answer Data</p>
+    </div>
+    <div class='code'>
+      <div class="highlight"><pre><span class="nb">print</span><span class="p">(</span><span class="s1">&#39;</span><span class="se">\n</span><span class="s1">[*] Pre-processing GQA Answers...&#39;</span><span class="p">)</span>
+<span class="n">ans2label</span><span class="p">,</span> <span class="n">label2ans</span> <span class="o">=</span> <span class="n">gqa_create_answers</span><span class="p">(</span><span class="n">gqa_q</span><span class="o">=</span><span class="n">args</span><span class="o">.</span><span class="n">gqa_questions</span><span class="p">,</span> <span class="n">cache</span><span class="o">=</span><span class="n">args</span><span class="o">.</span><span class="n">gqa_cache</span><span class="p">)</span></pre></div>
+    </div>
+  </div>
+  <div class='clearall'></div>
+  <div class='section' id='section-145'>
+    <div class='docs'>
+      <div class='octowrap'>
+        <a class='octothorpe' href='#section-145'>#</a>
+      </div>
+      <p>Create Image Features</p>
+    </div>
+    <div class='code'>
+      <div class="highlight"><pre><span class="nb">print</span><span class="p">(</span><span class="s1">&#39;</span><span class="se">\n</span><span class="s1">[*] Pre-processing GQA BUTD Image Features&#39;</span><span class="p">)</span>
+<span class="n">trainval_img2idx</span><span class="p">,</span> <span class="n">testdev_img2idx</span> <span class="o">=</span> <span class="n">gqa_create_image_features</span><span class="p">(</span><span class="n">gqa_f</span><span class="o">=</span><span class="n">args</span><span class="o">.</span><span class="n">gqa_features</span><span class="p">,</span> <span class="n">cache</span><span class="o">=</span><span class="n">args</span><span class="o">.</span><span class="n">gqa_cache</span><span class="p">)</span></pre></div>
+    </div>
+  </div>
+  <div class='clearall'></div>
+  <div class='section' id='section-146'>
+    <div class='docs'>
+      <div class='octowrap'>
+        <a class='octothorpe' href='#section-146'>#</a>
+      </div>
+      <p>Build Train and TestDev Datasets &ndash; Note here that we use the TestDev split of GQA instead of Val (as is common
+practice) because of Visual Genome data leakage in the Validation Set</p>
+    </div>
+    <div class='code'>
+      <div class="highlight"><pre><span class="nb">print</span><span class="p">(</span><span class="s1">&#39;</span><span class="se">\n</span><span class="s1">[*] Building GQA Train and TestDev Datasets...&#39;</span><span class="p">)</span>
+<span class="n">train_dataset</span> <span class="o">=</span> <span class="n">GQAFeatureDataset</span><span class="p">(</span><span class="n">dictionary</span><span class="p">,</span> <span class="n">ans2label</span><span class="p">,</span> <span class="n">label2ans</span><span class="p">,</span> <span class="n">trainval_img2idx</span><span class="p">,</span> <span class="n">gqa_q</span><span class="o">=</span><span class="n">args</span><span class="o">.</span><span class="n">gqa_questions</span><span class="p">,</span>
+                                  <span class="n">cache</span><span class="o">=</span><span class="n">args</span><span class="o">.</span><span class="n">gqa_cache</span><span class="p">,</span> <span class="n">mode</span><span class="o">=</span><span class="s1">&#39;train&#39;</span><span class="p">)</span>
+
+<span class="n">dev_dataset</span> <span class="o">=</span> <span class="n">GQAFeatureDataset</span><span class="p">(</span><span class="n">dictionary</span><span class="p">,</span> <span class="n">ans2label</span><span class="p">,</span> <span class="n">label2ans</span><span class="p">,</span> <span class="n">testdev_img2idx</span><span class="p">,</span> <span class="n">gqa_q</span><span class="o">=</span><span class="n">args</span><span class="o">.</span><span class="n">gqa_questions</span><span class="p">,</span>
+                                <span class="n">cache</span><span class="o">=</span><span class="n">args</span><span class="o">.</span><span class="n">gqa_cache</span><span class="p">,</span> <span class="n">mode</span><span class="o">=</span><span class="s1">&#39;testdev&#39;</span><span class="p">)</span></pre></div>
+    </div>
+  </div>
+  <div class='clearall'></div>
+  <div class='section' id='section-147'>
+    <div class='docs'>
+      <div class='octowrap'>
+        <a class='octothorpe' href='#section-147'>#</a>
+      </div>
+      <p>Create BUTD Module (and load Embeddings!)</p>
+    </div>
+    <div class='code'>
+      <div class="highlight"><pre><span class="nb">print</span><span class="p">(</span><span class="s1">&#39;</span><span class="se">\n</span><span class="s1">[*] Initializing Bottom-Up Top-Down Model...&#39;</span><span class="p">)</span>
+<span class="n">nn</span> <span class="o">=</span> <span class="n">BUTD</span><span class="p">(</span><span class="n">args</span><span class="p">,</span> <span class="n">train_dataset</span><span class="p">,</span> <span class="n">dev_dataset</span><span class="p">,</span> <span class="n">ans2label</span><span class="p">,</span> <span class="n">label2ans</span><span class="p">)</span>
+<span class="n">nn</span><span class="o">.</span><span class="n">w_emb</span><span class="o">.</span><span class="n">load_embeddings</span><span class="p">(</span><span class="n">emb</span><span class="p">)</span></pre></div>
+    </div>
+  </div>
+  <div class='clearall'></div>
+  <div class='section' id='section-148'>
+    <div class='docs'>
+      <div class='octowrap'>
+        <a class='octothorpe' href='#section-148'>#</a>
+      </div>
+      <p>Setup Logger for PyTorch-Lightning</p>
+    </div>
+    <div class='code'>
+      <div class="highlight"><pre><span class="n">mt_logger</span> <span class="o">=</span> <span class="n">MetricLogger</span><span class="p">(</span><span class="n">name</span><span class="o">=</span><span class="n">run_name</span><span class="p">,</span> <span class="n">save_dir</span><span class="o">=</span><span class="n">args</span><span class="o">.</span><span class="n">checkpoint</span><span class="p">)</span></pre></div>
+    </div>
+  </div>
+  <div class='clearall'></div>
+  <div class='section' id='section-149'>
+    <div class='docs'>
+      <div class='octowrap'>
+        <a class='octothorpe' href='#section-149'>#</a>
+      </div>
+      <p>Saves the top-3 Checkpoints based on Validation Accuracy &ndash; feel free to change this metric to suit your needs</p>
+    </div>
+    <div class='code'>
+      <div class="highlight"><pre><span class="n">checkpoint_callback</span> <span class="o">=</span> <span class="n">ModelCheckpoint</span><span class="p">(</span><span class="n">filepath</span><span class="o">=</span><span class="n">os</span><span class="o">.</span><span class="n">path</span><span class="o">.</span><span class="n">join</span><span class="p">(</span><span class="n">args</span><span class="o">.</span><span class="n">checkpoint</span><span class="p">,</span> <span class="s1">&#39;runs&#39;</span><span class="p">,</span> <span class="n">run_name</span><span class="p">,</span>
+                                                            <span class="s1">&#39;butd-</span><span class="si">{epoch:02d}</span><span class="s1">-</span><span class="si">{val_loss:.2f}</span><span class="s1">-</span><span class="si">{val_acc:.2f}</span><span class="s1">&#39;</span><span class="p">),</span>
+                                      <span class="n">monitor</span><span class="o">=</span><span class="s1">&#39;val_acc&#39;</span><span class="p">,</span> <span class="n">mode</span><span class="o">=</span><span class="s1">&#39;max&#39;</span><span class="p">,</span> <span class="n">save_top_k</span><span class="o">=</span><span class="mi">3</span><span class="p">)</span></pre></div>
+    </div>
+  </div>
+  <div class='clearall'></div>
+  <div class='section' id='section-150'>
+    <div class='docs'>
+      <div class='octowrap'>
+        <a class='octothorpe' href='#section-150'>#</a>
+      </div>
+      <p>Create Pytorch-Lightning Trainer &ndash; run for the given number of epochs, with gradient clipping!</p>
+    </div>
+    <div class='code'>
+      <div class="highlight"><pre><span class="n">trainer</span> <span class="o">=</span> <span class="n">pl</span><span class="o">.</span><span class="n">Trainer</span><span class="p">(</span><span class="n">default_root_dir</span><span class="o">=</span><span class="n">args</span><span class="o">.</span><span class="n">checkpoint</span><span class="p">,</span> <span class="n">max_epochs</span><span class="o">=</span><span class="n">args</span><span class="o">.</span><span class="n">epochs</span><span class="p">,</span> <span class="n">gradient_clip_val</span><span class="o">=</span><span class="n">args</span><span class="o">.</span><span class="n">gradient_clip</span><span class="p">,</span>
+                     <span class="n">gpus</span><span class="o">=</span><span class="n">args</span><span class="o">.</span><span class="n">gpus</span><span class="p">,</span> <span class="n">benchmark</span><span class="o">=</span><span class="kc">True</span><span class="p">,</span> <span class="n">logger</span><span class="o">=</span><span class="n">mt_logger</span><span class="p">,</span> <span class="n">checkpoint_callback</span><span class="o">=</span><span class="n">checkpoint_callback</span><span class="p">)</span></pre></div>
+    </div>
+  </div>
+  <div class='clearall'></div>
+  <div class='section' id='section-151'>
+    <div class='docs'>
+      <div class='octowrap'>
+        <a class='octothorpe' href='#section-151'>#</a>
+      </div>
+      <p>Fit and Profit!</p>
+    </div>
+    <div class='code'>
+      <div class="highlight"><pre><span class="nb">print</span><span class="p">(</span><span class="s1">&#39;</span><span class="se">\n</span><span class="s1">[*] Training...</span><span class="se">\n</span><span class="s1">&#39;</span><span class="p">)</span>
+<span class="n">trainer</span><span class="o">.</span><span class="n">fit</span><span class="p">(</span><span class="n">nn</span><span class="p">)</span>
+
+</pre></div>
+    </div>
+  </div>
+  <div class='clearall'></div>
+</div>
+</body>
