@@ -44,7 +44,7 @@ def visualize():
     # Plot
     for m in metrics:
         plt.figure(figsize=(10, 10))
-        for model in metrics[m]:
+        for model in sorted(metrics[m]):
             plt.plot(range(len(metrics[m][model])), metrics[m][model], label=model)
         plt.title('%s %s' % (args.dataset, DISPATCH[m]))
         plt.xlabel('Training Epoch')
