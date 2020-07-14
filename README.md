@@ -14,9 +14,9 @@ The repository is factored into multiple branches:
    codebase, broken apart into different modules for pre-processing, model creation, and training, for
    VQA2, GQA, and NLVR2. Use this branch for most research/development purposes.
    
- - The **[Dataset-Streamlined Branches]** contain a single-file annotated version of the BUTD codebase 
-   for each of the various VQA tasks. Use these branches to slowly step through the code (to better understand 
-   pre-processing intricacies, model design choices, etc.)
+ - The **[Dataset-ipynb Branches]** contain a single-file annotated IPython Notebook of the BUTD codebase for each of 
+   the various VQA tasks. Use these branches to slowly step through the code (to better understand pre-processing 
+   intricacies, model design choices, etc.)
  
 ## Repository Overview
 This branch (**[Modular]**) contains the following components:
@@ -29,6 +29,8 @@ This branch (**[Modular]**) contains the following components:
     + `preprocessing/` - Preprocessing utilities for each of the three VQA Datasets
 - `train.py` - Core script for launching BUTD/BU-FiLM training for any of the three VQA Datasets. This is the entry
                point to the code base.
+- `visualize.py` - Core script for plotting training results using Matplotlib. Not too sophisticated, just aggregates 
+                   results from metrics.json.
 
 ## Quickstart
 
@@ -48,6 +50,7 @@ Download the data -- GloVe Vectors, Question Files, and Bottom-Up Image Features
 **Warning:** These datasets take up a lot of disk space!
 
 ```bash
+# GloVe Embeddings
 ./scripts/glove.sh
 
 # GQA
